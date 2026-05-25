@@ -54,12 +54,10 @@ export class EnemyAISystem {
   private readonly projectileInstances: THREE.InstancedMesh;
 
   private readonly entries: EnemyEntry[] = [];
-  private readonly scene: THREE.Scene;
   private readonly entityManager: EntityManager;
   private readonly playerVehicle: Vehicle;
 
   constructor(scene: THREE.Scene, enemyMeshes: THREE.Mesh[]) {
-    this.scene = scene;
     this.entityManager = new EntityManager();
     this.playerVehicle = new Vehicle();
 

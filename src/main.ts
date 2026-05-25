@@ -18,6 +18,8 @@ import { createSurfaceScene, SurfaceController, SurfaceScene, SURFACE_EYE_HEIGHT
 import { WarpSystem, getSectorName, checkBlackHoleProximity } from './warp';
 import { StoreUI, STORE_X, STORE_Z, STORE_INTERACTION_RADIUS, purchaseItem } from './store';
 import { saveGame, loadGame } from './saveLoad';
+import { CAMERA_NEAR, CAMERA_FAR, createSpaceFog } from './cameraConfig';
+import { renderFrame } from './renderDispatch';
 
 const PLAYER_MAX_HEALTH = 100;
 const PLAYER_MAX_SHIELD = 100;
@@ -38,7 +40,7 @@ type SceneMode = 'space' | 'surface';
 // ── Space scene ────────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000005);
-scene.fog = new THREE.FogExp2(0x000005, 0.005);
+scene.fog = createSpaceFog();
 
 const ambient = new THREE.AmbientLight(0x445577, 2.5);
 scene.add(ambient);
@@ -51,8 +53,8 @@ scene.add(sun);
 const camera = new THREE.PerspectiveCamera(
   75,
   window.innerWidth / window.innerHeight,
-  0.1,
-  2000,
+  CAMERA_NEAR,
+  CAMERA_FAR,
 );
 
 const cockpitFillLight = new THREE.PointLight(0xffffff, 1.2, 3.0);
@@ -68,8 +70,8 @@ scene.add(camera);
 const surfaceCamera = new THREE.PerspectiveCamera(
   75,
   window.innerWidth / window.innerHeight,
-  0.1,
-  2000,
+  CAMERA_NEAR,
+  CAMERA_FAR,
 );
 
 // ── Crosshair ──────────────────────────────────────────────────────────────────
@@ -734,19 +736,25 @@ function animate(): void {
       sectorNameEl.style.opacity = String(warpSystem.nameAlpha);
     }
 
+    // Compute bearing/elevation for each blip relative to player orientation
+    const invQuat = camera.quaternion.clone().invert();
+    const makeBlip = (pos: THREE.Vector3, type: 'asteroid' | 'enemy'): RadarBlip => {
+      const offset = pos.clone().sub(camera.position).applyQuaternion(invQuat);
+      const hDist = Math.sqrt(offset.x * offset.x + offset.z * offset.z);
+      return {
+        position: pos,
+        type,
+        bearing: Math.atan2(offset.x, offset.z),
+        elevation: Math.atan2(offset.y, hDist),
+      };
+    };
     const radarBlips: RadarBlip[] = [
-      ...sectorObjects.asteroids.map((a) => ({
-        position: a.position,
-        type: 'asteroid' as const,
-      })),
-      ...sectorObjects.enemies.map((e) => ({
-        position: e.position,
-        type: 'enemy' as const,
-      })),
+      ...sectorObjects.asteroids.map((a) => makeBlip(a.position, 'asteroid')),
+      ...sectorObjects.enemies.map((e) => makeBlip(e.position, 'enemy')),
     ];
     hud.updateRadar(camera.position, camera.quaternion, radarBlips);
 
-    renderer.render(scene, camera);
+    renderFrame(renderer, 'space', scene, camera, null, surfaceCamera);
 
   // ── Surface mode ───────────────────────────────────────────────────────────
   } else if (sceneMode === 'surface' && currentSurface && surfaceController) {
@@ -797,7 +805,7 @@ function animate(): void {
       landingSystem.beginLaunch(sectorObjects);
     }
 
-    renderer.render(currentSurface.scene, surfaceCamera);
+    renderFrame(renderer, 'surface', scene, camera, currentSurface.scene, surfaceCamera);
   }
 }
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { createCockpitMesh } from './cockpit';
+import { createCockpitMesh, computeRadarContacts, RADAR_RANGE } from './cockpit';
+import { PURSUIT_RANGE } from './enemy';
 
 describe('createCockpitMesh', () => {
   it('returns an object whose group is a THREE.Group', () => {
@@ -212,8 +213,8 @@ describe('createCockpitMesh', () => {
   it('updateRadar makes in-range blips visible', () => {
     const hud = createCockpitMesh();
     const blips = [
-      { position: new THREE.Vector3(10, 0, -50), type: 'asteroid' as const },
-      { position: new THREE.Vector3(-30, 5, 20), type: 'enemy' as const },
+      { position: new THREE.Vector3(10, 0, -50), type: 'asteroid' as const, bearing: 0, elevation: 0 },
+      { position: new THREE.Vector3(-30, 5, 20), type: 'enemy' as const, bearing: 0, elevation: 0 },
     ];
     hud.updateRadar(new THREE.Vector3(0, 0, 0), new THREE.Quaternion(), blips);
 
@@ -223,10 +224,11 @@ describe('createCockpitMesh', () => {
     expect(visibleBlips.length).toBe(2);
   });
 
-  it('updateRadar hides blips for objects beyond RADAR_RANGE (200 units)', () => {
+  it('updateRadar hides blips for objects beyond RADAR_RANGE', () => {
     const hud = createCockpitMesh();
+    // Place blip well outside detection range
     const blips = [
-      { position: new THREE.Vector3(0, 0, -300), type: 'asteroid' as const }, // 300 > 200
+      { position: new THREE.Vector3(0, 0, -(RADAR_RANGE + 100)), type: 'asteroid' as const, bearing: 0, elevation: 0 },
     ];
     hud.updateRadar(new THREE.Vector3(0, 0, 0), new THREE.Quaternion(), blips);
 
@@ -238,7 +240,7 @@ describe('createCockpitMesh', () => {
 
   it('updateRadar hides all blips when called with empty list after a populated one', () => {
     const hud = createCockpitMesh();
-    const blips = [{ position: new THREE.Vector3(10, 0, 10), type: 'enemy' as const }];
+    const blips = [{ position: new THREE.Vector3(10, 0, 10), type: 'enemy' as const, bearing: 0, elevation: 0 }];
     hud.updateRadar(new THREE.Vector3(0, 0, 0), new THREE.Quaternion(), blips);
     hud.updateRadar(new THREE.Vector3(0, 0, 0), new THREE.Quaternion(), []);
 
@@ -246,5 +248,280 @@ describe('createCockpitMesh', () => {
       (c) => c.userData.isBlip && c.visible,
     );
     expect(visibleBlips.length).toBe(0);
+  });
+
+  // ── Radar 3D display: elevation encoding ──────────────────────────────────
+
+  it('cockpit group contains a RADAR label mesh', () => {
+    const hud = createCockpitMesh();
+    const radarLabel = hud.group.children.find((c) => c.userData.hudReadout === 'radar');
+    expect(radarLabel).toBeDefined();
+  });
+
+  it('RADAR label text is set to "RADAR"', () => {
+    const hud = createCockpitMesh();
+    const radarLabel = hud.group.children.find((c) => c.userData.hudReadout === 'radar');
+    expect(radarLabel?.userData.hudReadoutText).toBe('RADAR');
+  });
+
+  it('blip with positive elevation is positioned above blip at zero elevation', () => {
+    const hud = createCockpitMesh();
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    // Level blip
+    hud.updateRadar(playerPos, playerQuat, [
+      { position: new THREE.Vector3(0, 0, 50), type: 'enemy' as const, bearing: 0, elevation: 0 },
+    ]);
+    const levelY = hud.group.children.find((c) => c.userData.isBlip && c.visible)!.position.y;
+
+    // Blip above player
+    hud.updateRadar(playerPos, playerQuat, [
+      { position: new THREE.Vector3(0, 30, 50), type: 'enemy' as const, bearing: 0, elevation: Math.PI / 6 },
+    ]);
+    const aboveY = hud.group.children.find((c) => c.userData.isBlip && c.visible)!.position.y;
+
+    expect(aboveY).toBeGreaterThan(levelY);
+  });
+
+  it('blip with negative elevation is positioned below blip at zero elevation', () => {
+    const hud = createCockpitMesh();
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    // Level blip
+    hud.updateRadar(playerPos, playerQuat, [
+      { position: new THREE.Vector3(0, 0, 50), type: 'enemy' as const, bearing: 0, elevation: 0 },
+    ]);
+    const levelY = hud.group.children.find((c) => c.userData.isBlip && c.visible)!.position.y;
+
+    // Blip below player
+    hud.updateRadar(playerPos, playerQuat, [
+      { position: new THREE.Vector3(0, -30, 50), type: 'enemy' as const, bearing: 0, elevation: -Math.PI / 6 },
+    ]);
+    const belowY = hud.group.children.find((c) => c.userData.isBlip && c.visible)!.position.y;
+
+    expect(belowY).toBeLessThan(levelY);
+  });
+
+  it('blip directly above (elevation = π/2) reaches maximum y on radar', () => {
+    const hud = createCockpitMesh();
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    hud.updateRadar(playerPos, playerQuat, [
+      { position: new THREE.Vector3(0, 50, 0), type: 'enemy' as const, bearing: 0, elevation: Math.PI / 2 },
+    ]);
+    const topBlip = hud.group.children.find((c) => c.userData.isBlip && c.visible);
+    expect(topBlip).toBeDefined();
+    // y should be above the radar center (y = -0.23)
+    expect(topBlip!.position.y).toBeGreaterThan(-0.23);
+  });
+
+  it('blip directly below (elevation = -π/2) reaches minimum y on radar', () => {
+    const hud = createCockpitMesh();
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    hud.updateRadar(playerPos, playerQuat, [
+      { position: new THREE.Vector3(0, -50, 0), type: 'enemy' as const, bearing: 0, elevation: -Math.PI / 2 },
+    ]);
+    const bottomBlip = hud.group.children.find((c) => c.userData.isBlip && c.visible);
+    expect(bottomBlip).toBeDefined();
+    // y should be below the radar center (y = -0.23)
+    expect(bottomBlip!.position.y).toBeLessThan(-0.23);
+  });
+
+  it('blip to the right (bearing = π/2) has x > radar center x', () => {
+    const hud = createCockpitMesh();
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    hud.updateRadar(playerPos, playerQuat, [
+      { position: new THREE.Vector3(50, 0, 0), type: 'enemy' as const, bearing: Math.PI / 2, elevation: 0 },
+    ]);
+    const blip = hud.group.children.find((c) => c.userData.isBlip && c.visible);
+    expect(blip).toBeDefined();
+    // Radar center x = 0.92; blip to the right should have x > 0.92
+    expect(blip!.position.x).toBeGreaterThan(0.92);
+  });
+
+  it('blip to the left (bearing = -π/2) has x < radar center x', () => {
+    const hud = createCockpitMesh();
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    hud.updateRadar(playerPos, playerQuat, [
+      { position: new THREE.Vector3(-50, 0, 0), type: 'enemy' as const, bearing: -Math.PI / 2, elevation: 0 },
+    ]);
+    const blip = hud.group.children.find((c) => c.userData.isBlip && c.visible);
+    expect(blip).toBeDefined();
+    // Blip to the left should have x < 0.92
+    expect(blip!.position.x).toBeLessThan(0.92);
+  });
+
+  it('enemy blips use a hostile red color', () => {
+    const hud = createCockpitMesh();
+    hud.updateRadar(new THREE.Vector3(), new THREE.Quaternion(), [
+      { position: new THREE.Vector3(0, 0, 50), type: 'enemy' as const, bearing: 0, elevation: 0 },
+    ]);
+    const blip = hud.group.children.find(
+      (c): c is THREE.Mesh => c.userData.isBlip && c.visible,
+    ) as THREE.Mesh;
+    const mat = blip.material as THREE.MeshLambertMaterial;
+    // Red channel dominant (hostile appearance)
+    expect(mat.color.r).toBeGreaterThan(mat.color.g);
+    expect(mat.color.r).toBeGreaterThan(mat.color.b);
+  });
+});
+
+// ── computeRadarContacts ──────────────────────────────────────────────────────
+
+describe('computeRadarContacts', () => {
+  it('RADAR_RANGE is at least as large as PURSUIT_RANGE (enemy engagement range)', () => {
+    expect(RADAR_RANGE).toBeGreaterThanOrEqual(PURSUIT_RANGE);
+  });
+
+  it('enemy directly ahead (+Z) and above (+Y) has positive elevation and near-zero bearing', () => {
+    // Player at origin, identity quaternion (facing +Z)
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion(); // identity
+
+    const enemy = { position: new THREE.Vector3(0, 50, 100) };
+    const contacts = computeRadarContacts([enemy], playerPos, playerQuat);
+
+    expect(contacts.length).toBe(1);
+    expect(contacts[0].elevation).toBeGreaterThan(0);
+    expect(contacts[0].bearing).toBeCloseTo(0, 5);
+  });
+
+  it('enemy directly behind (-Z) and below (-Y) has negative elevation and bearing ≈ ±π', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    const enemy = { position: new THREE.Vector3(0, -50, -100) };
+    const contacts = computeRadarContacts([enemy], playerPos, playerQuat);
+
+    expect(contacts.length).toBe(1);
+    expect(contacts[0].elevation).toBeLessThan(0);
+    // bearing should be close to π (or -π) — check absolute value
+    expect(Math.abs(contacts[0].bearing)).toBeCloseTo(Math.PI, 5);
+  });
+
+  it('enemy to the right (+X) has positive bearing', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    const enemy = { position: new THREE.Vector3(100, 0, 0) };
+    const contacts = computeRadarContacts([enemy], playerPos, playerQuat);
+
+    expect(contacts.length).toBe(1);
+    expect(contacts[0].bearing).toBeCloseTo(Math.PI / 2, 4);
+    expect(contacts[0].elevation).toBeCloseTo(0, 4);
+  });
+
+  it('enemy to the left (-X) has negative bearing', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    const enemy = { position: new THREE.Vector3(-100, 0, 0) };
+    const contacts = computeRadarContacts([enemy], playerPos, playerQuat);
+
+    expect(contacts.length).toBe(1);
+    expect(contacts[0].bearing).toBeCloseTo(-Math.PI / 2, 4);
+  });
+
+  it('enemy beyond RADAR_RANGE is excluded', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    const farEnemy = { position: new THREE.Vector3(0, 0, RADAR_RANGE + 1) };
+    const contacts = computeRadarContacts([farEnemy], playerPos, playerQuat);
+    expect(contacts.length).toBe(0);
+  });
+
+  it('enemy exactly at RADAR_RANGE boundary is excluded (strictly greater-than filter)', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    // Inside range
+    const nearEnemy = { position: new THREE.Vector3(0, 0, RADAR_RANGE - 1) };
+    expect(computeRadarContacts([nearEnemy], playerPos, playerQuat).length).toBe(1);
+
+    // Outside range
+    const farEnemy = { position: new THREE.Vector3(0, 0, RADAR_RANGE + 1) };
+    expect(computeRadarContacts([farEnemy], playerPos, playerQuat).length).toBe(0);
+  });
+
+  it('adding an enemy to the input array causes it to appear in the next call result', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    const enemies: Array<{ position: THREE.Vector3 }> = [];
+    expect(computeRadarContacts(enemies, playerPos, playerQuat).length).toBe(0);
+
+    enemies.push({ position: new THREE.Vector3(0, 0, 50) });
+    expect(computeRadarContacts(enemies, playerPos, playerQuat).length).toBe(1);
+  });
+
+  it('removing an enemy from the input array causes it to be absent in the next call result', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+
+    const enemy = { position: new THREE.Vector3(0, 0, 50) };
+    const enemies: Array<{ position: THREE.Vector3 }> = [enemy];
+    expect(computeRadarContacts(enemies, playerPos, playerQuat).length).toBe(1);
+
+    enemies.splice(0, 1);
+    expect(computeRadarContacts(enemies, playerPos, playerQuat).length).toBe(0);
+  });
+
+  it('all returned contacts have type "enemy"', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+    const enemies = [
+      { position: new THREE.Vector3(10, 0, 10) },
+      { position: new THREE.Vector3(-20, 5, 30) },
+    ];
+    const contacts = computeRadarContacts(enemies, playerPos, playerQuat);
+    expect(contacts.every((c) => c.type === 'enemy')).toBe(true);
+  });
+
+  it('bearing and elevation are in expected ranges', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+    const enemies = [
+      { position: new THREE.Vector3(30, 20, 50) },
+      { position: new THREE.Vector3(-80, -40, -60) },
+    ];
+    const contacts = computeRadarContacts(enemies, playerPos, playerQuat);
+    for (const c of contacts) {
+      expect(c.bearing).toBeGreaterThanOrEqual(-Math.PI);
+      expect(c.bearing).toBeLessThanOrEqual(Math.PI);
+      expect(c.elevation).toBeGreaterThanOrEqual(-Math.PI / 2);
+      expect(c.elevation).toBeLessThanOrEqual(Math.PI / 2);
+    }
+  });
+
+  it('returns empty array when enemies array is empty', () => {
+    const contacts = computeRadarContacts([], new THREE.Vector3(), new THREE.Quaternion());
+    expect(contacts).toEqual([]);
+  });
+
+  it('player orientation (quaternion) affects bearing calculation', () => {
+    // Enemy is at world +X = (100, 0, 0).
+    // Player faces +Z (identity): enemy is to the right → bearing ≈ π/2.
+    // Player faces +X (rotate +π/2 around Y): enemy is directly ahead → bearing ≈ 0.
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const enemy = { position: new THREE.Vector3(100, 0, 0) };
+
+    const facingZ = new THREE.Quaternion(); // identity — local +Z = world +Z
+    const [facingZContact] = computeRadarContacts([enemy], playerPos, facingZ);
+    expect(facingZContact.bearing).toBeCloseTo(Math.PI / 2, 3);
+
+    // Rotate +π/2 around Y: local +Z maps to world +X (player faces +X)
+    const facingX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+    const [facingXContact] = computeRadarContacts([enemy], playerPos, facingX);
+    expect(facingXContact.bearing).toBeCloseTo(0, 3);
   });
 });

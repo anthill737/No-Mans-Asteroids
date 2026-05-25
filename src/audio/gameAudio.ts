@@ -52,7 +52,15 @@ export class GameAudio {
   private readonly ctx: AudioContext | null;
   private lowHealthCooldown = 0;
   private chaingunNodeId: ReturnType<typeof setInterval> | null = null;
-  private chaingunGain: GainNode | null = null;
+
+  // Per-hit timestamp fields for rate-limiting (ms since epoch, -Infinity = never fired)
+  private shieldHitLastMs = -Infinity;
+  private hullHitLastMs = -Infinity;
+  private lowHealthHitLastMs = -Infinity;
+
+  private static readonly SHIELD_HIT_COOLDOWN_MS = 100;
+  private static readonly HULL_HIT_COOLDOWN_MS = 100;
+  private static readonly LOW_HEALTH_HIT_COOLDOWN_MS = 200;
 
   constructor() {
     this.ctx = getCtx();
@@ -63,6 +71,14 @@ export class GameAudio {
     if (this.ctx && this.ctx.state === 'suspended') {
       void this.ctx.resume();
     }
+  }
+
+  /**
+   * Pure cooldown guard — exposed for unit testing via direct timestamp injection.
+   * Returns true (allowed) when nowMs - lastMs >= windowMs, false (suppressed) otherwise.
+   */
+  _hitCooldownAllowed(lastMs: number, nowMs: number, windowMs: number): boolean {
+    return nowMs - lastMs >= windowMs;
   }
 
   // ── Weapons ──────────────────────────────────────────────────────────────────
@@ -189,6 +205,109 @@ export class GameAudio {
 
   playEnemyDestroy(): void {
     this._playExplosion(0.8);
+  }
+
+  // ── Player hit feedback ───────────────────────────────────────────────────────
+
+  /**
+   * High-pitched resonant "shzzt" — electronic energy deflection off shields.
+   * Distinct from hull/explosion sounds by using white noise through a highpass
+   * filter in the 2800 Hz range.
+   * Rate-limited to one instance per 100 ms.
+   */
+  playPlayerShieldHit(): void {
+    const now = Date.now();
+    if (!this._hitCooldownAllowed(this.shieldHitLastMs, now, GameAudio.SHIELD_HIT_COOLDOWN_MS)) return;
+    this.shieldHitLastMs = now;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const duration = 0.1;
+    const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * duration), ctx.sampleRate);
+    fillNoise(buf); // white noise — bright, electronic character
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.value = 2800;
+    filter.Q.value = 4;
+    const gain = ctx.createGain();
+    envelope(gain, ctx, 0.001, 0.03, 0.07, 0.4);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start();
+  }
+
+  /**
+   * Deep low-frequency thud — physical hull impact.
+   * Brown noise through a very low lowpass (300 Hz) gives a heavy, muffled feel
+   * distinct from shield hit (high freq) and asteroid hit (900 Hz lowpass).
+   * Rate-limited to one instance per 100 ms.
+   */
+  playPlayerHullHit(): void {
+    const now = Date.now();
+    if (!this._hitCooldownAllowed(this.hullHitLastMs, now, GameAudio.HULL_HIT_COOLDOWN_MS)) return;
+    this.hullHitLastMs = now;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const duration = 0.22;
+    const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * duration), ctx.sampleRate);
+    fillNoise(buf, 'brown');
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 300;
+    const gain = ctx.createGain();
+    envelope(gain, ctx, 0.001, 0.08, 0.14, 0.6);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start();
+  }
+
+  /**
+   * Hull thud layered with an alarm oscillator — signals critical damage.
+   * Noticeably more urgent than shield/hull variants due to the square-wave
+   * overlay descending from 880→660 Hz.
+   * Rate-limited to one instance per 200 ms.
+   */
+  playPlayerLowHealthHit(): void {
+    const now = Date.now();
+    if (!this._hitCooldownAllowed(this.lowHealthHitLastMs, now, GameAudio.LOW_HEALTH_HIT_COOLDOWN_MS)) return;
+    this.lowHealthHitLastMs = now;
+    const ctx = this.ctx;
+    if (!ctx) return;
+    // Deep hull thud layer
+    const duration = 0.3;
+    const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * duration), ctx.sampleRate);
+    fillNoise(buf, 'brown');
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 400;
+    const gain = ctx.createGain();
+    envelope(gain, ctx, 0.001, 0.1, 0.2, 0.7);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start();
+    // Alarm oscillator overlay — the urgency marker
+    const osc = ctx.createOscillator();
+    const oscGain = ctx.createGain();
+    osc.connect(oscGain);
+    oscGain.connect(ctx.destination);
+    osc.type = 'square';
+    const t = ctx.currentTime;
+    osc.frequency.setValueAtTime(880, t);
+    osc.frequency.linearRampToValueAtTime(660, t + 0.15);
+    oscGain.gain.setValueAtTime(0, t);
+    oscGain.gain.linearRampToValueAtTime(0.25, t + 0.01);
+    oscGain.gain.setValueAtTime(0.25, t + 0.08);
+    oscGain.gain.linearRampToValueAtTime(0, t + 0.15);
+    osc.start(t);
+    osc.stop(t + 0.15);
   }
 
   // ── Navigation ────────────────────────────────────────────────────────────────
@@ -340,4 +459,33 @@ export class GameAudio {
       osc.stop(t + 0.15);
     });
   }
+}
+
+
+// ── Pure hit-audio selector ───────────────────────────────────────────────────
+
+export type PlayerHitAudioMethod =
+  | 'playPlayerShieldHit'
+  | 'playPlayerHullHit'
+  | 'playPlayerLowHealthHit';
+
+const PLAYER_LOW_HEALTH_THRESHOLD = 0.25;
+
+/**
+ * Pure selector with no audio side-effects. Maps applyDamage return values and
+ * current health fraction to the correct GameAudio method name.
+ * Returns null when neither shieldDamage nor hullDamage is positive.
+ */
+export function selectPlayerHitAudio(
+  shieldDamage: number,
+  hullDamage: number,
+  healthFraction: number,
+): PlayerHitAudioMethod | null {
+  if (hullDamage > 0) {
+    return healthFraction < PLAYER_LOW_HEALTH_THRESHOLD
+      ? 'playPlayerLowHealthHit'
+      : 'playPlayerHullHit';
+  }
+  if (shieldDamage > 0) return 'playPlayerShieldHit';
+  return null;
 }

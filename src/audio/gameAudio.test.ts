@@ -268,6 +268,104 @@ describe('checkLowHealth', () => {
   });
 });
 
+// ── Player hit cooldown guard ─────────────────────────────────────────────────
+// Tests use direct timestamp injection — no AudioContext mocking required.
+
+describe('_hitCooldownAllowed', () => {
+  it('returns false (suppressed) when within cooldown window', () => {
+    const audio = makeAudio();
+    const now = 1_000_000;
+    // lastMs was 50ms ago, window is 100ms — still within window
+    expect(audio._hitCooldownAllowed(now - 50, now, 100)).toBe(false);
+  });
+
+  it('returns true (allowed) when cooldown has elapsed', () => {
+    const audio = makeAudio();
+    const now = 1_000_000;
+    // lastMs was 200ms ago, window is 100ms — elapsed
+    expect(audio._hitCooldownAllowed(now - 200, now, 100)).toBe(true);
+  });
+
+  it('returns true when lastMs is -Infinity (never fired)', () => {
+    const audio = makeAudio();
+    expect(audio._hitCooldownAllowed(-Infinity, 1_000_000, 100)).toBe(true);
+  });
+
+  it('returns false when nowMs equals lastMs (fired this exact instant)', () => {
+    const audio = makeAudio();
+    const now = 1_000_000;
+    expect(audio._hitCooldownAllowed(now, now, 100)).toBe(false);
+  });
+
+  it('returns true exactly at the window boundary', () => {
+    const audio = makeAudio();
+    const now = 1_000_000;
+    // elapsed == windowMs: allowed
+    expect(audio._hitCooldownAllowed(now - 100, now, 100)).toBe(true);
+  });
+});
+
+// ── Player hit audio ──────────────────────────────────────────────────────────
+
+describe('player hit audio', () => {
+  it('playPlayerShieldHit creates a buffer source', () => {
+    const audio = makeAudio();
+    audio.playPlayerShieldHit();
+    expect(mockCreateBuffer).toHaveBeenCalledTimes(1);
+    expect(mockCreateBiquadFilter).toHaveBeenCalledTimes(1);
+  });
+
+  it('playPlayerHullHit creates a buffer source', () => {
+    const audio = makeAudio();
+    audio.playPlayerHullHit();
+    expect(mockCreateBuffer).toHaveBeenCalledTimes(1);
+    expect(mockCreateBiquadFilter).toHaveBeenCalledTimes(1);
+  });
+
+  it('playPlayerLowHealthHit creates a buffer source and an oscillator', () => {
+    const audio = makeAudio();
+    audio.playPlayerLowHealthHit();
+    expect(mockCreateBuffer).toHaveBeenCalledTimes(1);
+    expect(mockCreateOscillator).toHaveBeenCalledTimes(1);
+  });
+
+  it('playPlayerShieldHit is suppressed on immediate second call (within cooldown)', () => {
+    const audio = makeAudio();
+    audio.playPlayerShieldHit(); // fires
+    expect(mockCreateBuffer).toHaveBeenCalledTimes(1);
+    vi.clearAllMocks();
+    audio.playPlayerShieldHit(); // suppressed — still within 100ms window
+    expect(mockCreateBuffer).not.toHaveBeenCalled();
+  });
+
+  it('playPlayerHullHit is suppressed on immediate second call (within cooldown)', () => {
+    const audio = makeAudio();
+    audio.playPlayerHullHit();
+    expect(mockCreateBuffer).toHaveBeenCalledTimes(1);
+    vi.clearAllMocks();
+    audio.playPlayerHullHit();
+    expect(mockCreateBuffer).not.toHaveBeenCalled();
+  });
+
+  it('playPlayerLowHealthHit is suppressed on immediate second call (within cooldown)', () => {
+    const audio = makeAudio();
+    audio.playPlayerLowHealthHit();
+    expect(mockCreateBuffer).toHaveBeenCalledTimes(1);
+    vi.clearAllMocks();
+    audio.playPlayerLowHealthHit();
+    expect(mockCreateBuffer).not.toHaveBeenCalled();
+  });
+
+  it('shield and hull hits use independent cooldown state', () => {
+    const audio = makeAudio();
+    audio.playPlayerShieldHit(); // fires shield, sets shieldHitLastMs
+    vi.clearAllMocks();
+    // hull hit has its own independent timestamp — should still fire
+    audio.playPlayerHullHit();
+    expect(mockCreateBuffer).toHaveBeenCalledTimes(1);
+  });
+});
+
 // ── No-op when AudioContext unavailable ───────────────────────────────────────
 
 describe('graceful no-op without AudioContext', () => {
@@ -288,7 +386,49 @@ describe('graceful no-op without AudioContext', () => {
       audio.playUIClick();
       audio.playStorePurchase();
       audio.checkLowHealth(0.1, 0.016);
+      audio.playPlayerShieldHit();
+      audio.playPlayerHullHit();
+      audio.playPlayerLowHealthHit();
     }).not.toThrow();
     vi.stubGlobal('AudioContext', MockAudioContext);
+  });
+});
+
+
+// ── selectPlayerHitAudio pure selector ──────────────────────────────────────────
+
+import { selectPlayerHitAudio } from './gameAudio';
+
+describe('selectPlayerHitAudio', () => {
+  it('maps a shield-only hit to playPlayerShieldHit', () => {
+    // shieldDamage > 0, hullDamage = 0 — shields absorbed the hit
+    expect(selectPlayerHitAudio(10, 0, 0.8)).toBe('playPlayerShieldHit');
+  });
+
+  it('maps a hull hit (healthy) to playPlayerHullHit', () => {
+    // hullDamage > 0, health fraction above low-health threshold
+    expect(selectPlayerHitAudio(0, 15, 0.5)).toBe('playPlayerHullHit');
+  });
+
+  it('maps a hull hit that drops health below 25% to playPlayerLowHealthHit', () => {
+    // hullDamage > 0, health fraction below low-health threshold
+    expect(selectPlayerHitAudio(0, 20, 0.2)).toBe('playPlayerLowHealthHit');
+  });
+
+  it('maps a hull hit at exactly 25% health to playPlayerHullHit (boundary is exclusive)', () => {
+    expect(selectPlayerHitAudio(0, 5, 0.25)).toBe('playPlayerHullHit');
+  });
+
+  it('maps a hull hit just below 25% to playPlayerLowHealthHit', () => {
+    expect(selectPlayerHitAudio(0, 5, 0.249)).toBe('playPlayerLowHealthHit');
+  });
+
+  it('hull damage takes priority over shield damage when both are positive', () => {
+    // Damage overflows shields: both shieldDamage and hullDamage > 0
+    expect(selectPlayerHitAudio(5, 10, 0.6)).toBe('playPlayerHullHit');
+  });
+
+  it('returns null when no damage was dealt', () => {
+    expect(selectPlayerHitAudio(0, 0, 1.0)).toBeNull();
   });
 });
