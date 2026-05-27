@@ -34,6 +34,10 @@ describe('ChaingunSystem constants', () => {
   it('deals less damage per shot than the laser', () => {
     expect(CHAINGUN_DAMAGE).toBeLessThan(LASER_DAMAGE);
   });
+
+  it('deals non-zero damage per hit', () => {
+    expect(CHAINGUN_DAMAGE).toBeGreaterThan(0);
+  });
 });
 
 // ── Ammo ────────────────────────────────────────────────────────────────────

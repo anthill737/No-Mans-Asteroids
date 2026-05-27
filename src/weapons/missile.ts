@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import { spheresOverlap } from '../collision';
 import { LASER_DAMAGE } from '../laser';
+import { AMMO_CAPACITY } from '../ammoConfig';
 
 export const MISSILE_DAMAGE = 100; // high damage: destroys a 100-health enemy in 1 hit
 export const MISSILE_SPEED = 30; // units per second — slow physical projectile
 export const MISSILE_MAX_RANGE = 600; // units before auto-removal
 export const MISSILE_RADIUS = 1.0; // collision sphere radius
-export const MISSILE_MAX_AMMO = 8; // ≤10 per spec
+export const MISSILE_MAX_AMMO = AMMO_CAPACITY.missile;
 
 // Sanity: missiles must deal significantly more damage than a laser shot.
 if (MISSILE_DAMAGE <= LASER_DAMAGE) {

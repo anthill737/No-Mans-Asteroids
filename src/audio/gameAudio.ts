@@ -50,6 +50,8 @@ function envelope(
 
 export class GameAudio {
   private readonly ctx: AudioContext | null;
+  private sfxOutput: GainNode | null = null;
+  private sfxVolumeScale = 1;
   private lowHealthCooldown = 0;
   private chaingunNodeId: ReturnType<typeof setInterval> | null = null;
 
@@ -64,6 +66,30 @@ export class GameAudio {
 
   constructor() {
     this.ctx = getCtx();
+  }
+
+  setSfxVolumeScale(scale: number): void {
+    this.sfxVolumeScale = Math.max(0, Math.min(1, scale));
+    if (this.ctx && this.sfxOutput) {
+      this.sfxOutput.gain.setValueAtTime(this.sfxVolumeScale, this.ctx.currentTime);
+    }
+  }
+
+  private getSfxDestination(ctx: AudioContext): AudioNode {
+    if (this.sfxOutput === null) {
+      this.sfxOutput = ctx.createGain();
+      this.sfxOutput.gain.value = this.sfxVolumeScale;
+      this.sfxOutput.connect(ctx.destination);
+    }
+    return this.sfxOutput;
+  }
+
+  private connectToSfxOutput(node: AudioNode, ctx: AudioContext): void {
+    if (this.sfxVolumeScale === 1 && this.sfxOutput === null) {
+      node.connect(ctx.destination);
+    } else {
+      node.connect(this.getSfxDestination(ctx));
+    }
   }
 
   /** Call on first user gesture to unlock the AudioContext. */
@@ -89,7 +115,7 @@ export class GameAudio {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     osc.type = 'sawtooth';
     const t = ctx.currentTime;
     osc.frequency.setValueAtTime(880, t);
@@ -132,7 +158,7 @@ export class GameAudio {
     envelope(gain, ctx, 0.05, 0.2, 0.25, 0.6);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
   }
 
@@ -157,7 +183,7 @@ export class GameAudio {
     envelope(gain, ctx, 0.001, 0.05, 0.13, 0.5);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
   }
 
@@ -177,7 +203,7 @@ export class GameAudio {
     envelope(gain, ctx, 0.001, 0.1, 0.3, 0.7);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
   }
 
@@ -199,7 +225,7 @@ export class GameAudio {
     envelope(gain, ctx, 0.001, 0.04, 0.11, 0.5);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
   }
 
@@ -234,7 +260,7 @@ export class GameAudio {
     envelope(gain, ctx, 0.001, 0.03, 0.07, 0.4);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
   }
 
@@ -262,7 +288,7 @@ export class GameAudio {
     envelope(gain, ctx, 0.001, 0.08, 0.14, 0.6);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
   }
 
@@ -291,13 +317,13 @@ export class GameAudio {
     envelope(gain, ctx, 0.001, 0.1, 0.2, 0.7);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
     // Alarm oscillator overlay — the urgency marker
     const osc = ctx.createOscillator();
     const oscGain = ctx.createGain();
     osc.connect(oscGain);
-    oscGain.connect(ctx.destination);
+    this.connectToSfxOutput(oscGain, ctx);
     osc.type = 'square';
     const t = ctx.currentTime;
     osc.frequency.setValueAtTime(880, t);
@@ -319,7 +345,7 @@ export class GameAudio {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     osc.type = 'sine';
     const t = ctx.currentTime;
     const dur = 1.2;
@@ -342,7 +368,7 @@ export class GameAudio {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     osc.type = 'square';
     const t = ctx.currentTime;
     osc.frequency.setValueAtTime(1200, t);
@@ -362,7 +388,7 @@ export class GameAudio {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      this.connectToSfxOutput(gain, ctx);
       osc.type = 'sine';
       const t = ctx.currentTime + i * 0.12;
       osc.frequency.setValueAtTime(freq, t);
@@ -415,7 +441,7 @@ export class GameAudio {
     envelope(gain, ctx, 0.001, 0.01, 0.05, 0.4);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
   }
 
@@ -435,7 +461,7 @@ export class GameAudio {
     envelope(gain, ctx, 0.001, 0.05, 0.5, volume);
     src.connect(filter);
     filter.connect(gain);
-    gain.connect(ctx.destination);
+    this.connectToSfxOutput(gain, ctx);
     src.start();
   }
 
@@ -447,7 +473,7 @@ export class GameAudio {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      this.connectToSfxOutput(gain, ctx);
       osc.type = 'square';
       const t = ctx.currentTime + offset;
       osc.frequency.setValueAtTime(440, t);

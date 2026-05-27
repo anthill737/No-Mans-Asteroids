@@ -1,5 +1,11 @@
 import * as THREE from 'three';
 import { buildStoreBuilding } from './store';
+import {
+  composeShip,
+  DEFAULT_SHIP_LOADOUT,
+  findShipMarker,
+  type ShipLoadout,
+} from './shipParts';
 
 export { STORE_X, STORE_Z } from './store';
 export { STORE_INTERACTION_RADIUS } from './store';
@@ -120,68 +126,15 @@ function buildTerrain(seed: number): THREE.Mesh {
  * The ship faces toward the player spawn point (+Z direction), so the
  * cockpit and nose are visible as the player walks up.
  */
-function buildShip(seed: number): { marker: THREE.Mesh; group: THREE.Group } {
+function buildShip(seed: number, loadout: ShipLoadout = DEFAULT_SHIP_LOADOUT): { marker: THREE.Mesh; group: THREE.Group } {
   const group = new THREE.Group();
   const y0 = terrainHeight(SHIP_X, SHIP_Z, seed);
 
-  const hullMat  = new THREE.MeshLambertMaterial({ color: 0x8899aa, flatShading: true });
-  const darkMat  = new THREE.MeshLambertMaterial({ color: 0x445566, flatShading: true });
-  const cockpitMat = new THREE.MeshBasicMaterial({ color: 0x44aaff });
-  const engineMat  = new THREE.MeshLambertMaterial({ color: 0x222233, flatShading: true });
-  const glowMat    = new THREE.MeshBasicMaterial({ color: 0xff6600 });
-  const strutMat   = new THREE.MeshLambertMaterial({ color: 0x334455, flatShading: true });
   const padMat     = new THREE.MeshBasicMaterial({ color: 0xffcc00 });
 
-  // ── Fuselage ────────────────────────────────────────────────────────────────
-  const fuselageGeo = new THREE.BoxGeometry(2.2, 1.4, 8);
-  const fuselage = new THREE.Mesh(fuselageGeo, hullMat);
-  fuselage.position.set(SHIP_X, y0 + 1.5, SHIP_Z);
-  group.add(fuselage);
-
-  // ── Wings ───────────────────────────────────────────────────────────────────
-  const wingGeo = new THREE.BoxGeometry(5, 0.3, 3.5);
-  const leftWing = new THREE.Mesh(wingGeo, darkMat);
-  leftWing.position.set(SHIP_X - 3.6, y0 + 1.25, SHIP_Z + 0.5);
-  group.add(leftWing);
-  const rightWing = new THREE.Mesh(wingGeo, darkMat);
-  rightWing.position.set(SHIP_X + 3.6, y0 + 1.25, SHIP_Z + 0.5);
-  group.add(rightWing);
-
-  // ── Nose cone (tip points toward player, +Z direction) ─────────────────────
-  const noseGeo = new THREE.ConeGeometry(1.1, 2.8, 8);
-  const noseMesh = new THREE.Mesh(noseGeo, hullMat);
-  noseMesh.rotation.x = Math.PI / 2;
-  noseMesh.position.set(SHIP_X, y0 + 1.5, SHIP_Z + 5.4);
-  group.add(noseMesh);
-
-  // ── Cockpit dome ────────────────────────────────────────────────────────────
-  const cockpitGeo = new THREE.SphereGeometry(0.75, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2);
-  const cockpitMesh = new THREE.Mesh(cockpitGeo, cockpitMat);
-  cockpitMesh.position.set(SHIP_X, y0 + 2.2, SHIP_Z + 2.2);
-  group.add(cockpitMesh);
-
-  // ── Engine pods (x2 at rear) ────────────────────────────────────────────────
-  const engineGeo = new THREE.CylinderGeometry(0.45, 0.6, 2.2, 8);
-  for (const xOff of [-0.75, 0.75]) {
-    const pod = new THREE.Mesh(engineGeo, engineMat);
-    pod.rotation.x = Math.PI / 2;
-    pod.position.set(SHIP_X + xOff, y0 + 1.3, SHIP_Z - 4.1);
-    group.add(pod);
-
-    const glowGeo = new THREE.CircleGeometry(0.44, 8);
-    const glow = new THREE.Mesh(glowGeo, glowMat);
-    glow.rotation.x = -Math.PI / 2;
-    glow.position.set(SHIP_X + xOff, y0 + 1.3, SHIP_Z - 5.3);
-    group.add(glow);
-  }
-
-  // ── Landing struts (4 legs) ─────────────────────────────────────────────────
-  const strutGeo = new THREE.CylinderGeometry(0.1, 0.15, 1.0, 6);
-  for (const [sx, sz] of [[-0.8, 2.5], [0.8, 2.5], [-0.8, -2.5], [0.8, -2.5]] as const) {
-    const strut = new THREE.Mesh(strutGeo, strutMat);
-    strut.position.set(SHIP_X + sx, y0 + 0.8, SHIP_Z + sz);
-    group.add(strut);
-  }
+  const shipOrigin = new THREE.Vector3(SHIP_X, y0, SHIP_Z);
+  const ship = composeShip(loadout.cockpit, loadout.wings, loadout.hull, { origin: shipOrigin });
+  group.add(ship);
 
   // ── Launch pad ring ──────────────────────────────────────────────────────────
   const padRingGeo = new THREE.TorusGeometry(LAUNCH_THRESHOLD * 0.85, 0.25, 6, 48);
@@ -206,10 +159,12 @@ function buildShip(seed: number): { marker: THREE.Mesh; group: THREE.Group } {
   engineLight.position.set(SHIP_X, y0 + 1.3, SHIP_Z - 5);
   group.add(engineLight);
 
-  return { marker: fuselage, group };
+  const marker = findShipMarker(ship);
+  if (!marker) throw new Error('Hull variant must provide a ship marker mesh');
+  return { marker, group };
 }
 
-export function createSurfaceScene(seed: number): SurfaceScene {
+export function createSurfaceScene(seed: number, loadout: ShipLoadout = DEFAULT_SHIP_LOADOUT): SurfaceScene {
   const scene = new THREE.Scene();
 
   const skyColor = new THREE.Color(0xd4884a);
@@ -225,7 +180,7 @@ export function createSurfaceScene(seed: number): SurfaceScene {
 
   scene.add(buildTerrain(seed));
 
-  const { marker: shipMarker, group: shipGroup } = buildShip(seed);
+  const { marker: shipMarker, group: shipGroup } = buildShip(seed, loadout);
   scene.add(shipGroup);
 
   scene.add(buildStoreBuilding(seed, terrainHeight));
@@ -259,6 +214,11 @@ export class SurfaceController {
   detach(): void {
     window.removeEventListener('keydown', this._onKeyDown);
     window.removeEventListener('keyup', this._onKeyUp);
+    this.keys = {};
+    this._eLatch = false;
+  }
+
+  clearInput(): void {
     this.keys = {};
     this._eLatch = false;
   }

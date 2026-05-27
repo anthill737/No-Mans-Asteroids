@@ -44,8 +44,8 @@ function simulateFrames(
 // ── Constants ───────────────────────────────────────────────────────────────
 
 describe('MissileSystem constants', () => {
-  it('MISSILE_MAX_AMMO is ≤10', () => {
-    expect(MISSILE_MAX_AMMO).toBeLessThanOrEqual(10);
+  it('MISSILE_MAX_AMMO is the P10 capacity', () => {
+    expect(MISSILE_MAX_AMMO).toBe(12);
   });
 
   it('MISSILE_DAMAGE is significantly greater than LASER_DAMAGE', () => {

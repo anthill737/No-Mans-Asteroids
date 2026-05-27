@@ -1,11 +1,11 @@
 import * as THREE from 'three';
-import { createCockpitMesh, RadarBlip } from './cockpit';
+import { computeRadarContacts, createCockpitMesh } from './cockpit';
 import { setupPointerLock } from './pointerlock';
-import { FlightController } from './flight';
+import { FlightController, getNormalMaxForwardSpeed, getStrongBoostMaxForwardSpeed } from './flight';
 import { generateSector, SectorObjects } from './sector';
 import { LaserSystem } from './laser';
 import { ChaingunSystem } from './weapons/chaingun';
-import { MissileSystem, MISSILE_MAX_AMMO } from './weapons/missile';
+import { MissileSystem } from './weapons/missile';
 import { handleAsteroidDestroyed } from './asteroid';
 import { PlayerStats } from './player';
 import { EnemyAISystem, ENEMY_PROJECTILE_DAMAGE } from './enemy';
@@ -13,18 +13,41 @@ import { CreditWallet } from './credits';
 import { createGameOverScreen } from './gameover';
 import { createCrosshair } from './crosshair';
 import { GameAudio } from './audio/gameAudio';
+import { EngineAudio } from './audio/engineAudio';
 import { LandingSystem, LANDING_THRESHOLD } from './landing';
 import { createSurfaceScene, SurfaceController, SurfaceScene, SURFACE_EYE_HEIGHT } from './surface';
 import { WarpSystem, getSectorName, checkBlackHoleProximity } from './warp';
 import { StoreUI, STORE_X, STORE_Z, STORE_INTERACTION_RADIUS, purchaseItem } from './store';
-import { saveGame, loadGame } from './saveLoad';
+import {
+  createLoadLastSaveHandler,
+  createSaveNowHandler,
+  loadGame,
+  saveGame,
+  type GameSaveState,
+} from './saveLoad';
 import { CAMERA_NEAR, CAMERA_FAR, createSpaceFog } from './cameraConfig';
 import { renderFrame } from './renderDispatch';
+import { createHowlerSoundVolumeLayer, createSettingsOverlay } from './settings';
+import { collectDamageableSpaceTargets, handleDamageableSpaceHit } from './weapons/targeting';
+import { AMMO_CAPACITY } from './ammoConfig';
+import {
+  ControlBindings,
+  isKeyboardEventForAction,
+  isMouseEventForAction,
+  loadControlBindings,
+} from './controlBindings';
+import {
+  applyLoadout as applyShipLoadout,
+  composeShip,
+  DEFAULT_SHIP_LOADOUT,
+  normalizeShipLoadout,
+  positionShipForFpv,
+  type ShipLoadout,
+  type ShipLoadoutInput,
+} from './shipParts';
 
 const PLAYER_MAX_HEALTH = 100;
 const PLAYER_MAX_SHIELD = 100;
-const LASER_MAX_AMMO = 30;
-const CHAINGUN_MAX_AMMO = 120;
 const RETURN_INVINCIBILITY_DURATION = 4.0;
 
 // Spawn looking slightly upward so the ship cockpit (y≈2, z=-12) sits near
@@ -63,6 +86,15 @@ camera.add(cockpitFillLight);
 
 const hud = createCockpitMesh();
 camera.add(hud.group);
+let currentLoadout: ShipLoadout = { ...DEFAULT_SHIP_LOADOUT };
+const fpvShip = composeShip(
+  currentLoadout.cockpit,
+  currentLoadout.wings,
+  currentLoadout.hull,
+);
+positionShipForFpv(fpvShip);
+camera.add(fpvShip);
+hud.bindToCockpit(fpvShip);
 scene.add(camera);
 
 // ── Surface camera (standalone — NOT added to any scene so Three.js will
@@ -221,18 +253,20 @@ document.body.appendChild(creditsEl);
 
 // ── Audio ──────────────────────────────────────────────────────────────────────
 const gameAudio = new GameAudio();
+const engineAudio = new EngineAudio();
 
 // ── Input ──────────────────────────────────────────────────────────────────────
 const euler = new THREE.Euler(0, 0, 0, 'YXZ');
-const flight = new FlightController();
+let controlBindings: ControlBindings = loadControlBindings();
+const flight = new FlightController(controlBindings);
 flight.attach();
 
 // ── Game objects ───────────────────────────────────────────────────────────────
 const player = new PlayerStats(PLAYER_MAX_HEALTH, PLAYER_MAX_SHIELD);
 const wallet = new CreditWallet(0);
-const laser = new LaserSystem(scene, LASER_MAX_AMMO);
-const chaingun = new ChaingunSystem(scene, CHAINGUN_MAX_AMMO);
-const missiles = new MissileSystem(scene, MISSILE_MAX_AMMO);
+const laser = new LaserSystem(scene, AMMO_CAPACITY.laser);
+const chaingun = new ChaingunSystem(scene, AMMO_CAPACITY.chaingun);
+const missiles = new MissileSystem(scene, AMMO_CAPACITY.missile);
 let activeWeapon: ActiveWeapon = 'laser';
 let isMouseDown = false;
 let sectorObjects: SectorObjects = generateSector(scene, Math.floor(Math.random() * 0xffffffff));
@@ -252,6 +286,29 @@ let returnInvincibilityTimer = 0;
 // True once the player explicitly dismisses the panel — prevents immediate re-open.
 // Resets when the player walks out of the approach radius.
 let storeDismissed = false;
+
+function applyLoadout(newLoadout: ShipLoadoutInput): void {
+  currentLoadout = normalizeShipLoadout(newLoadout);
+  applyShipLoadout(currentLoadout, fpvShip);
+  positionShipForFpv(fpvShip);
+  hud.bindToCockpit(fpvShip);
+  syncHudWithLiveState();
+}
+
+const runtimeWindow = window as Window & {
+  spaceGame?: {
+    applyLoadout?: (loadout: ShipLoadoutInput) => ShipLoadout;
+    getLoadout?: () => ShipLoadout;
+  };
+};
+runtimeWindow.spaceGame = {
+  ...runtimeWindow.spaceGame,
+  applyLoadout: (loadout: ShipLoadoutInput) => {
+    applyLoadout(loadout);
+    return { ...currentLoadout };
+  },
+  getLoadout: () => ({ ...currentLoadout }),
+};
 
 // ── Store UI (surface only) ────────────────────────────────────────────────────
 const storeUI = new StoreUI(
@@ -280,23 +337,90 @@ const storeUI = new StoreUI(
 // ── Warp system ────────────────────────────────────────────────────────────────
 const warpSystem = new WarpSystem(1);
 
+function setWalletBalance(credits: number): void {
+  wallet.spend(wallet.balance);
+  wallet.earn(credits);
+}
+
+function clearSectorObjects(): void {
+  sectorObjects.asteroids.forEach((a) => scene.remove(a));
+  scene.remove(sectorObjects.blackHole);
+  sectorObjects.enemies.forEach((e) => scene.remove(e));
+  sectorObjects.planets.forEach((p) => scene.remove(p));
+  enemyAI.reset();
+}
+
+function resetSurfaceStateForLoad(): void {
+  const wasSurfaceMode = sceneMode === 'surface';
+  if (surfaceController) {
+    surfaceController.detach();
+    surfaceController = null;
+  }
+  currentSurface = null;
+  sceneMode = 'space';
+  if (wasSurfaceMode) flight.attach();
+  storeUI.hide();
+  storeDismissed = false;
+  storeHintEl.style.opacity = '0';
+  shipHintEl.style.opacity = '0';
+  fadeEl.style.opacity = '0';
+  landingSystem.state = 'space';
+  landingSystem.fadeAlpha = 0;
+  savedSpacePosition = null;
+  landedPlanet = null;
+  returnInvincibilityTimer = 0;
+  invincibleEl.style.opacity = '0';
+}
+
+function applySaveState(state: GameSaveState, resetGameOver = false): void {
+  resetSurfaceStateForLoad();
+
+  applyLoadout(state.loadout);
+  setWalletBalance(state.credits);
+  player.maxHealth = state.hullUpgrade + PLAYER_MAX_HEALTH;
+  player.maxShield = state.shieldUpgrade + PLAYER_MAX_SHIELD;
+  player.health = Math.min(state.health, player.maxHealth);
+  player.shield = Math.min(state.shield, player.maxShield);
+  player.thrustBonus = state.engineThrustBonus;
+  player.speedBonus = state.engineSpeedBonus;
+  player.unlockedWeapons.clear();
+  state.unlockedWeapons.forEach((w) => player.unlockedWeapons.add(w));
+  laser.reset(state.laserAmmo);
+  chaingun.reset(state.chaingunAmmo);
+  missiles.reset(state.missileAmmo);
+  flight.thrustBonus = player.thrustBonus;
+  flight.speedBonus = player.speedBonus;
+  warpSystem.reset(state.sectorId);
+
+  clearSectorObjects();
+  sectorObjects = generateSector(scene, state.sectorId);
+  enemyAI = new EnemyAISystem(scene, sectorObjects.enemies);
+
+  camera.position.set(0, 0, 0);
+  euler.set(0, 0, 0);
+  flight.reset();
+  clearLiveInput();
+
+  hud.setHealth(player.health / player.maxHealth);
+  hud.setShield(player.shield / player.maxShield);
+  updateHudAmmo();
+  hud.setCredits(wallet.balance);
+  hud.setSpeed(flight.velocity, getNormalMaxForwardSpeed(flight.speedBonus), getNormalMaxForwardSpeed(flight.speedBonus));
+  creditsEl.textContent = `⬡ ${wallet.balance} CR`;
+  warpEl.style.opacity = '0';
+  sectorNameEl.style.opacity = '0';
+  sectorNameEl.textContent = getSectorName(warpSystem.sectorId);
+
+  if (resetGameOver) {
+    isGameOver = false;
+    gameOverScreen.hide();
+  }
+}
+
 // ── Restore save (if present) ─────────────────────────────────────────────────
 const savedState = loadGame();
 if (savedState !== null) {
-  wallet.earn(savedState.credits);
-  player.maxHealth = savedState.hullUpgrade + PLAYER_MAX_HEALTH;
-  player.maxShield = savedState.shieldUpgrade + PLAYER_MAX_SHIELD;
-  player.health = Math.min(savedState.health, player.maxHealth);
-  player.shield = Math.min(savedState.shield, player.maxShield);
-  player.thrustBonus = savedState.engineThrustBonus;
-  player.speedBonus = savedState.engineSpeedBonus;
-  savedState.unlockedWeapons.forEach((w) => player.unlockedWeapons.add(w));
-  laser.reset(savedState.laserAmmo);
-  chaingun.reset(savedState.chaingunAmmo);
-  missiles.reset(savedState.missileAmmo);
-  flight.thrustBonus = player.thrustBonus;
-  flight.speedBonus = player.speedBonus;
-  warpSystem.reset(savedState.sectorId);
+  applySaveState(savedState);
 }
 
 hud.setHealth(player.health / player.maxHealth);
@@ -304,6 +428,8 @@ hud.setShield(player.shield / player.maxShield);
 hud.setAmmo(laser.ammo, laser.maxAmmo);
 hud.setActiveWeapon('laser');
 hud.setCredits(wallet.balance);
+hud.setBoostActive(false);
+hud.setSpeed(flight.velocity, getNormalMaxForwardSpeed(flight.speedBonus), getNormalMaxForwardSpeed(flight.speedBonus));
 creditsEl.textContent = `⬡ ${wallet.balance} CR`;
 
 function updateCreditsDisplay(): void {
@@ -321,7 +447,31 @@ function updateHudAmmo(): void {
   }
 }
 
-function buildSaveState() {
+function syncHudWithLiveState(): void {
+  hud.setHealth(player.health / player.maxHealth);
+  hud.setShield(player.shield / player.maxShield);
+  updateHudAmmo();
+  hud.setActiveWeapon(activeWeapon);
+  hud.setCredits(wallet.balance);
+
+  const boostAllowed = warpSystem.state === 'idle';
+  const boostActive = flight.isStrongBoostEngaged(boostAllowed);
+  const normalMaxSpeed = getNormalMaxForwardSpeed(flight.speedBonus);
+  const currentMaxSpeed = boostActive
+    ? getStrongBoostMaxForwardSpeed(flight.speedBonus)
+    : normalMaxSpeed;
+  hud.setBoostActive(boostActive);
+  hud.setSpeed(flight.velocity, normalMaxSpeed, currentMaxSpeed);
+
+  const radarContacts = computeRadarContacts(
+    sectorObjects.enemies,
+    camera.position,
+    camera.quaternion,
+  );
+  hud.updateRadar(camera.position, camera.quaternion, radarContacts);
+}
+
+function buildSaveState(): GameSaveState {
   return {
     credits: wallet.balance,
     sectorId: warpSystem.sectorId,
@@ -335,6 +485,7 @@ function buildSaveState() {
     laserAmmo: laser.ammo,
     chaingunAmmo: chaingun.ammo,
     missileAmmo: missiles.ammo,
+    loadout: { ...currentLoadout },
   };
 }
 
@@ -354,6 +505,8 @@ function removeDeadEnemy(enemyMesh: THREE.Mesh): void {
 
 // ── Restart ────────────────────────────────────────────────────────────────────
 function restartGame(): void {
+  settingsMenu.close();
+
   if (sceneMode === 'surface') {
     if (surfaceController) { surfaceController.detach(); surfaceController = null; }
     currentSurface = null;
@@ -378,15 +531,19 @@ function restartGame(): void {
   hud.setHealth(player.health / player.maxHealth);
   hud.setShield(player.shield / player.maxShield);
 
-  laser.reset(LASER_MAX_AMMO);
-  chaingun.reset(CHAINGUN_MAX_AMMO);
-  missiles.reset(MISSILE_MAX_AMMO);
+  laser.reset(AMMO_CAPACITY.laser);
+  chaingun.reset(AMMO_CAPACITY.chaingun);
+  missiles.reset(AMMO_CAPACITY.missile);
   gameAudio.stopChaingunChatter();
+  engineAudio.stopAll();
   gameAudio.resetLowHealthWarning();
   activeWeapon = 'laser';
   isMouseDown = false;
+  applyLoadout(DEFAULT_SHIP_LOADOUT);
   updateHudAmmo();
   hud.setActiveWeapon('laser');
+  hud.setBoostActive(false);
+  hud.setSpeed(flight.velocity, getNormalMaxForwardSpeed(flight.speedBonus), getNormalMaxForwardSpeed(flight.speedBonus));
 
   camera.position.set(0, 0, 0);
   euler.set(0, 0, 0);
@@ -411,9 +568,89 @@ function restartGame(): void {
 
 const gameOverScreen = createGameOverScreen(restartGame);
 
+function clearLiveInput(): void {
+  isMouseDown = false;
+  flight.clearInput();
+  surfaceController?.clearInput();
+  hud.setBoostActive(false);
+}
+
+const handleSaveNow = createSaveNowHandler({
+  getState: buildSaveState,
+});
+
+const handleLoadLastSave = createLoadLastSaveHandler({
+  getCurrentState: buildSaveState,
+  applyState: (state) => {
+    applySaveState(state, true);
+  },
+});
+
+let masterVolumeScale = 1;
+let sfxVolumeScale = 1;
+const syncGeneratedSfxVolume = (): void => {
+  gameAudio.setSfxVolumeScale(masterVolumeScale * sfxVolumeScale);
+};
+
+const settingsMenu = createSettingsOverlay({
+  controlBindings,
+  onControlBindingsChange: (bindings) => {
+    controlBindings = bindings;
+    flight.setBindings(controlBindings);
+    clearLiveInput();
+  },
+  sound: {
+    volumeLayer: createHowlerSoundVolumeLayer({
+      master: (scale) => {
+        masterVolumeScale = scale;
+        syncGeneratedSfxVolume();
+      },
+      sfx: (scale) => {
+        sfxVolumeScale = scale;
+        syncGeneratedSfxVolume();
+      },
+      engine: (scale) => {
+        engineAudio.setVolumeScale(scale);
+      },
+    }),
+  },
+  ship: {
+    getLoadout: () => ({ ...currentLoadout }),
+    onApplyLoadout: (loadout) => {
+      gameAudio.playUIClick();
+      applyLoadout(loadout);
+      saveGame(buildSaveState());
+      return { ...currentLoadout };
+    },
+  },
+  onOpen: () => {
+    clearLiveInput();
+    gameAudio.stopChaingunChatter();
+    engineAudio.stopAll();
+    if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
+    gameAudio.playUIClick();
+  },
+  onClose: () => {
+    clearLiveInput();
+    gameAudio.playUIClick();
+  },
+  onTabChange: () => {
+    gameAudio.playUIClick();
+  },
+  onSaveNow: () => {
+    gameAudio.playUIClick();
+    return handleSaveNow();
+  },
+  onLoadLastSave: () => {
+    gameAudio.playUIClick();
+    return handleLoadLastSave();
+  },
+});
+
 // ── Pointer lock ───────────────────────────────────────────────────────────────
 setupPointerLock(renderer.domElement, (dx, dy) => {
   if (isGameOver) return;
+  if (settingsMenu.isOpen) return;
   const ls = landingSystem.state;
   if (ls === 'landing-fadeout' || ls === 'surface-fadein') return;
   const sensitivity = 0.002;
@@ -428,39 +665,45 @@ document.addEventListener('mousedown', () => gameAudio.resume(), { once: true })
 document.addEventListener('keydown', () => gameAudio.resume(), { once: true });
 
 // ── Weapon switch ──────────────────────────────────────────────────────────────
+function selectWeapon(weapon: ActiveWeapon): void {
+  activeWeapon = weapon;
+  if (weapon !== 'chaingun') gameAudio.stopChaingunChatter();
+  updateHudAmmo();
+  hud.setActiveWeapon(weapon);
+  gameAudio.playUIClick();
+}
+
 document.addEventListener('keydown', (e) => {
   if (isGameOver) return;
+  if (settingsMenu.isOpen) return;
   if (sceneMode !== 'space') return;
-  if (e.key === '1') {
-    activeWeapon = 'laser';
-    gameAudio.stopChaingunChatter();
-    updateHudAmmo();
-    hud.setActiveWeapon('laser');
-    gameAudio.playUIClick();
-  } else if (e.key === '2') {
-    activeWeapon = 'chaingun';
-    updateHudAmmo();
-    hud.setActiveWeapon('chaingun');
-    gameAudio.playUIClick();
-  } else if (e.key === '3') {
-    activeWeapon = 'missile';
-    gameAudio.stopChaingunChatter();
-    updateHudAmmo();
-    hud.setActiveWeapon('missile');
-    gameAudio.playUIClick();
+  if (isKeyboardEventForAction(e, controlBindings, 'switchWeapon1')) {
+    selectWeapon('laser');
+  } else if (isKeyboardEventForAction(e, controlBindings, 'switchWeapon2')) {
+    selectWeapon('chaingun');
+  } else if (isKeyboardEventForAction(e, controlBindings, 'switchWeapon3')) {
+    selectWeapon('missile');
   }
 });
 
-// ── Store dismiss via ESC ──────────────────────────────────────────────────────
+// ── Settings / store dismiss ───────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && storeUI.isOpen) {
+  if (!isKeyboardEventForAction(e, controlBindings, 'openSettings')) return;
+  e.preventDefault();
+
+  if (settingsMenu.isOpen) {
+    settingsMenu.close();
+  } else if (storeUI.isOpen) {
     storeUI.dismiss(); // sets storeDismissed = true via onDismiss callback
     gameAudio.playUIClick();
+  } else if (!isGameOver) {
+    settingsMenu.open();
   }
 });
 
 // ── Manual save via F5 ────────────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
+  if (settingsMenu.isOpen) return;
   if (e.key === 'F5' && !isGameOver) {
     e.preventDefault();
     saveGame(buildSaveState());
@@ -468,16 +711,17 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ── Firing ─────────────────────────────────────────────────────────────────────
-document.addEventListener('mousedown', (e) => {
-  if (document.pointerLockElement !== renderer.domElement) return;
-  if (e.button !== 0) return;
-  if (isGameOver) return;
-  if (sceneMode !== 'space') return;
+function canUseWeaponInput(): boolean {
+  if (settingsMenu.isOpen) return false;
+  if (document.pointerLockElement !== renderer.domElement) return false;
+  if (isGameOver) return false;
+  if (sceneMode !== 'space') return false;
+  return true;
+}
 
-  isMouseDown = true;
-
+function fireCurrentWeaponOnce(): void {
   if (activeWeapon === 'laser') {
-    const allTargets = [...sectorObjects.asteroids, ...sectorObjects.enemies];
+    const allTargets = collectDamageableSpaceTargets(sectorObjects);
     const result = laser.fire(camera.position, camera.quaternion, allTargets);
     if (result.fired) {
       gameAudio.playLaserZap();
@@ -513,10 +757,32 @@ document.addEventListener('mousedown', (e) => {
       hud.setAmmo(result.ammoRemaining, missiles.maxAmmo);
     }
   }
+}
+
+document.addEventListener('mousedown', (e) => {
+  if (!isMouseEventForAction(e, controlBindings, 'fireWeapon')) return;
+  if (!canUseWeaponInput()) return;
+
+  isMouseDown = true;
+  fireCurrentWeaponOnce();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (!isKeyboardEventForAction(e, controlBindings, 'fireWeapon')) return;
+  if (!canUseWeaponInput()) return;
+
+  e.preventDefault();
+  isMouseDown = true;
+  if (!e.repeat) fireCurrentWeaponOnce();
 });
 
 document.addEventListener('mouseup', (e) => {
-  if (e.button !== 0) return;
+  if (!isMouseEventForAction(e, controlBindings, 'fireWeapon')) return;
+  isMouseDown = false;
+});
+
+document.addEventListener('keyup', (e) => {
+  if (!isKeyboardEventForAction(e, controlBindings, 'fireWeapon')) return;
   isMouseDown = false;
 });
 
@@ -539,6 +805,15 @@ function animate(): void {
   const dt = Math.min((now - lastTime) / 1000, 0.1);
   lastTime = now;
 
+  if (settingsMenu.isOpen) {
+    if (sceneMode === 'surface' && currentSurface) {
+      renderFrame(renderer, 'surface', scene, camera, currentSurface.scene, surfaceCamera);
+    } else {
+      renderFrame(renderer, 'space', scene, camera, null, surfaceCamera);
+    }
+    return;
+  }
+
   if (returnInvincibilityTimer > 0) {
     returnInvincibilityTimer = Math.max(0, returnInvincibilityTimer - dt);
     invincibleEl.style.opacity = String(returnInvincibilityTimer / RETURN_INVINCIBILITY_DURATION * 0.4);
@@ -556,7 +831,7 @@ function animate(): void {
   if (switchToSurface) {
     const planetPos = landedPlanet ? landedPlanet.position : (savedSpacePosition ?? new THREE.Vector3());
     const seed = Math.abs(Math.floor(planetPos.x * 100 + planetPos.z * 100)) % 0xffffff || 42;
-    currentSurface = createSurfaceScene(seed);
+    currentSurface = createSurfaceScene(seed, currentLoadout);
     surfaceController = new SurfaceController(seed);
     surfaceController.attach();
     flight.detach();
@@ -617,20 +892,37 @@ function animate(): void {
         landedPlanet = nearPlanet;
         landingSystem.beginLanding(sectorObjects);
         gameAudio.stopChaingunChatter();
+        engineAudio.stopAll();
         isMouseDown = false;
       } else {
-        flight.update(dt, euler, camera.position);
+        const boostAllowed = warpSystem.state === 'idle';
+        flight.update(dt, euler, camera.position, { boostAllowed });
+        const boostActive = flight.isStrongBoostEngaged(boostAllowed);
+        const normalMaxSpeed = getNormalMaxForwardSpeed(flight.speedBonus);
+        const currentMaxSpeed = boostActive
+          ? getStrongBoostMaxForwardSpeed(flight.speedBonus)
+          : normalMaxSpeed;
+        engineAudio.update({
+          inSpace: !isGameOver && sceneMode === 'space' && landingSystem.state === 'space',
+          onSurface: false,
+          inWarp: warpSystem.state !== 'idle',
+          thrustMagnitude: flight.getThrustInputMagnitude(),
+          boostActive,
+        }, dt);
+        hud.setBoostActive(boostActive);
+        hud.setSpeed(flight.velocity, normalMaxSpeed, currentMaxSpeed);
         camera.rotation.copy(euler);
         laser.update();
 
         const isFiringChaingun = isMouseDown && activeWeapon === 'chaingun';
 
+        const chaingunTargets = collectDamageableSpaceTargets(sectorObjects);
         const chaingunResults = chaingun.update(
           dt,
           isFiringChaingun,
           camera.position,
           camera.quaternion,
-          sectorObjects.asteroids,
+          chaingunTargets,
         );
 
         if (isFiringChaingun && chaingunResults.some((r) => r.fired)) {
@@ -642,22 +934,26 @@ function animate(): void {
         for (const result of chaingunResults) {
           if (result.fired) {
             hud.setAmmo(result.ammoRemaining, chaingun.maxAmmo);
-            if (result.hit && result.hitObject) {
-              if (result.hitObject.userData.health <= 0) {
+            handleDamageableSpaceHit(result, sectorObjects, {
+              onAsteroidHit: () => gameAudio.playAsteroidHit(),
+              onAsteroidDestroyed: (asteroid) => {
                 gameAudio.playAsteroidDestroy();
                 sectorObjects.asteroids = handleAsteroidDestroyed(
                   scene,
-                  result.hitObject,
+                  asteroid,
                   sectorObjects.asteroids,
                 );
-              } else {
-                gameAudio.playAsteroidHit();
-              }
-            }
+              },
+              onEnemyHit: () => gameAudio.playEnemyHit(),
+              onEnemyDestroyed: (enemy) => {
+                gameAudio.playEnemyDestroy();
+                removeDeadEnemy(enemy);
+              },
+            });
           }
         }
 
-        const missileTargets = [...sectorObjects.asteroids, ...sectorObjects.enemies];
+        const missileTargets = collectDamageableSpaceTargets(sectorObjects);
         const missileHits = missiles.update(dt, missileTargets);
 
         for (const hit of missileHits) {
@@ -695,6 +991,7 @@ function animate(): void {
           if (isDead) {
             isGameOver = true;
             gameAudio.stopChaingunChatter();
+            engineAudio.stopAll();
             gameOverScreen.show();
             document.exitPointerLock();
           }
@@ -705,9 +1002,13 @@ function animate(): void {
           warpSystem.beginWarp();
           gameAudio.playWarpActivation();
           gameAudio.stopChaingunChatter();
+          engineAudio.stopAll();
+          hud.setBoostActive(false);
           isMouseDown = false;
         }
       }
+    } else {
+      hud.setBoostActive(false);
     }
 
     // ── Warp state machine update ──────────────────────────────────────────────
@@ -736,28 +1037,25 @@ function animate(): void {
       sectorNameEl.style.opacity = String(warpSystem.nameAlpha);
     }
 
-    // Compute bearing/elevation for each blip relative to player orientation
-    const invQuat = camera.quaternion.clone().invert();
-    const makeBlip = (pos: THREE.Vector3, type: 'asteroid' | 'enemy'): RadarBlip => {
-      const offset = pos.clone().sub(camera.position).applyQuaternion(invQuat);
-      const hDist = Math.sqrt(offset.x * offset.x + offset.z * offset.z);
-      return {
-        position: pos,
-        type,
-        bearing: Math.atan2(offset.x, offset.z),
-        elevation: Math.atan2(offset.y, hDist),
-      };
-    };
-    const radarBlips: RadarBlip[] = [
-      ...sectorObjects.asteroids.map((a) => makeBlip(a.position, 'asteroid')),
-      ...sectorObjects.enemies.map((e) => makeBlip(e.position, 'enemy')),
-    ];
-    hud.updateRadar(camera.position, camera.quaternion, radarBlips);
+    const radarContacts = computeRadarContacts(
+      sectorObjects.enemies,
+      camera.position,
+      camera.quaternion,
+    );
+    hud.updateRadar(camera.position, camera.quaternion, radarContacts);
 
     renderFrame(renderer, 'space', scene, camera, null, surfaceCamera);
 
   // ── Surface mode ───────────────────────────────────────────────────────────
   } else if (sceneMode === 'surface' && currentSurface && surfaceController) {
+    engineAudio.update({
+      inSpace: false,
+      onSurface: true,
+      inWarp: false,
+      thrustMagnitude: 0,
+      boostActive: false,
+    }, dt);
+
     euler.x = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, euler.x));
     surfaceCamera.rotation.copy(euler);
 

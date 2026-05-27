@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { createCockpitMesh, computeRadarContacts, RADAR_RANGE } from './cockpit';
+import {
+  createCockpitMesh,
+  computeRadarContacts,
+  computeSpeedometerDisplay,
+  RADAR_RANGE,
+} from './cockpit';
+import { COCKPIT_READOUT_NODE_NAMES } from './cockpitReadouts';
 import { PURSUIT_RANGE } from './enemy';
 
 describe('createCockpitMesh', () => {
@@ -11,10 +17,13 @@ describe('createCockpitMesh', () => {
 
   it('exposes the five HUD control methods', () => {
     const hud = createCockpitMesh();
+    expect(typeof hud.bindToCockpit).toBe('function');
     expect(typeof hud.setHealth).toBe('function');
     expect(typeof hud.setShield).toBe('function');
     expect(typeof hud.setAmmo).toBe('function');
     expect(typeof hud.setActiveWeapon).toBe('function');
+    expect(typeof hud.setBoostActive).toBe('function');
+    expect(typeof hud.setSpeed).toBe('function');
     expect(typeof hud.updateRadar).toBe('function');
   });
 
@@ -201,6 +210,119 @@ describe('createCockpitMesh', () => {
     }
   });
 
+  it('rebinds HUD updates to the named readout nodes on a supplied cockpit object', () => {
+    const hud = createCockpitMesh();
+    const cockpit = new THREE.Group();
+    for (const name of COCKPIT_READOUT_NODE_NAMES) {
+      const node = new THREE.Group();
+      node.name = name;
+      cockpit.add(node);
+    }
+
+    hud.bindToCockpit(cockpit);
+    hud.setHealth(0.42);
+    hud.setShield(0.77);
+    hud.setAmmo(12, 30);
+    hud.setActiveWeapon('missile');
+    hud.setCredits(350);
+    hud.setBoostActive(true);
+    hud.setSpeed(new THREE.Vector3(12, 5, 0), 30, 48);
+    hud.updateRadar(
+      new THREE.Vector3(),
+      new THREE.Quaternion(),
+      [{ position: new THREE.Vector3(0, 0, 100), type: 'enemy', bearing: 0, elevation: 0 }],
+    );
+
+    expect(cockpit.getObjectByName('HEALTH')?.userData.hudReadoutText).toBe('HEALTH  42 / 100');
+    expect(cockpit.getObjectByName('SHIELDS')?.userData.hudReadoutText).toBe('SHIELDS  77 / 100');
+    expect(cockpit.getObjectByName('AMMO')?.userData.hudReadoutText).toBe('AMMO  12 / 30');
+    expect(cockpit.getObjectByName('WEAPON')?.userData.activeWeapon).toBe('missile');
+    expect(cockpit.getObjectByName('CREDITS')?.userData.credits).toBe(350);
+    expect(cockpit.getObjectByName('BOOST')?.userData.boostActive).toBe(true);
+    expect(cockpit.getObjectByName('SPEED_NUMERIC')?.userData.hudReadoutText).toBe('SPEED  13 m/s');
+    expect(cockpit.getObjectByName('SPEED_GAUGE')?.userData.boostZoneActive).toBe(true);
+    expect(cockpit.getObjectByName('CONTACTS')?.userData.contactCount).toBe(1);
+  });
+
+  // ── BOOST indicator ────────────────────────────────────────────────────────
+
+  it('contains a labeled BOOST readout and cockpit-geometry indicator', () => {
+    const hud = createCockpitMesh();
+    const boostLabel = hud.group.children.find((c) => c.userData.hudReadout === 'boost');
+    const boostIndicator = hud.group.children.find((c) => c.userData.isBoostIndicator);
+
+    expect(boostLabel).toBeDefined();
+    expect(boostLabel?.userData.hudReadoutText).toBe('BOOST');
+    expect(boostIndicator).toBeDefined();
+  });
+
+  it('BOOST indicator lights while active and dims while inactive', () => {
+    const hud = createCockpitMesh();
+    const boostIndicator = hud.group.children.find(
+      (c): c is THREE.Mesh => c.userData.isBoostIndicator,
+    );
+    expect(boostIndicator).toBeDefined();
+
+    hud.setBoostActive(true);
+    const mat = boostIndicator!.material as THREE.MeshLambertMaterial;
+    expect(boostIndicator!.userData.boostActive).toBe(true);
+    expect(mat.emissiveIntensity).toBeGreaterThan(0);
+
+    hud.setBoostActive(false);
+    expect(boostIndicator!.userData.boostActive).toBe(false);
+    expect(mat.emissiveIntensity).toBe(0);
+  });
+
+  // ── SPEED readout ──────────────────────────────────────────────────────────
+
+  it('contains a labeled SPEED readout and cockpit-geometry gauge', () => {
+    const hud = createCockpitMesh();
+    const speedLabel = hud.group.children.find((c) => c.userData.hudReadout === 'speed');
+    const speedGauge = hud.group.children.find((c) => c.userData.role === 'speedGaugeBg');
+
+    expect(speedLabel).toBeDefined();
+    expect(speedLabel?.userData.hudReadoutText).toBe('SPEED  0 m/s');
+    expect(speedGauge).toBeDefined();
+  });
+
+  it('setSpeed writes the numeric SPEED readout from authoritative velocity magnitude', () => {
+    const hud = createCockpitMesh();
+    hud.setSpeed(new THREE.Vector3(12, 5, 0), 30, 30);
+
+    expect(hud.getReadoutText('speed')).toBe('SPEED  13 m/s');
+  });
+
+  it('speed gauge fills to the current normal max-speed limit', () => {
+    const hud = createCockpitMesh();
+    const normalFillGroup = hud.group.children.find((c) => c.userData.role === 'speedNormalFill');
+    expect(normalFillGroup).toBeDefined();
+    const normalFill = normalFillGroup!.children[0] as THREE.Mesh;
+
+    hud.setSpeed(new THREE.Vector3(15, 0, 0), 30, 30);
+    expect(normalFill.scale.x).toBeCloseTo(0.5, 3);
+
+    hud.setSpeed(new THREE.Vector3(30, 0, 0), 30, 30);
+    expect(normalFill.scale.x).toBeCloseTo(1, 3);
+  });
+
+  it('speed gauge exposes a colored boost zone when current max speed exceeds normal max', () => {
+    const hud = createCockpitMesh();
+    const boostZone = hud.group.children.find(
+      (c): c is THREE.Mesh => c.userData.role === 'speedBoostZone',
+    );
+    const boostFillGroup = hud.group.children.find((c) => c.userData.role === 'speedBoostFill');
+    expect(boostZone).toBeDefined();
+    expect(boostFillGroup).toBeDefined();
+    const boostFill = boostFillGroup!.children[0] as THREE.Mesh;
+
+    hud.setSpeed(new THREE.Vector3(40, 0, 0), 30, 48);
+
+    expect(boostZone!.visible).toBe(true);
+    expect(boostZone!.userData.boostZoneActive).toBe(true);
+    expect(boostFill.visible).toBe(true);
+    expect(boostFill.scale.x).toBeGreaterThan(0);
+  });
+
   // ── updateRadar ────────────────────────────────────────────────────────────
 
   it('updateRadar does not throw with an empty blip list', () => {
@@ -382,6 +504,59 @@ describe('computeRadarContacts', () => {
     expect(RADAR_RANGE).toBeGreaterThanOrEqual(PURSUIT_RANGE);
   });
 
+  it('returns one derived contact per authoritative in-range world enemy and zero for no world enemies', () => {
+    const playerPos = new THREE.Vector3(30, -12, 75);
+    const playerQuat = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(0, Math.PI / 3, 0),
+    );
+    const localEnemyOffsets = [
+      new THREE.Vector3(0, 35, 180),
+      new THREE.Vector3(140, -45, 120),
+      new THREE.Vector3(-95, 10, -150),
+    ];
+    const world = {
+      enemies: localEnemyOffsets.map((localOffset) => {
+        const enemy = new THREE.Mesh();
+        enemy.position.copy(localOffset.clone().applyQuaternion(playerQuat).add(playerPos));
+        return enemy;
+      }),
+    };
+
+    const contacts = computeRadarContacts(world.enemies, playerPos, playerQuat);
+
+    expect(contacts).toHaveLength(world.enemies.length);
+    contacts.forEach((contact, index) => {
+      const derivedLocalOffset = world.enemies[index].position
+        .clone()
+        .sub(playerPos)
+        .applyQuaternion(playerQuat.clone().invert());
+      const horizontalDistance = Math.sqrt(
+        derivedLocalOffset.x * derivedLocalOffset.x
+          + derivedLocalOffset.z * derivedLocalOffset.z,
+      );
+
+      expect(contact.position).toEqual(world.enemies[index].position);
+      expect(contact.type).toBe('enemy');
+      expect(contact.bearing).toBeCloseTo(
+        Math.atan2(derivedLocalOffset.x, derivedLocalOffset.z),
+        5,
+      );
+      expect(contact.elevation).toBeCloseTo(
+        Math.atan2(derivedLocalOffset.y, horizontalDistance),
+        5,
+      );
+    });
+
+    expect(computeRadarContacts([], playerPos, playerQuat)).toHaveLength(0);
+    expect(
+      computeRadarContacts(
+        [{ position: new THREE.Vector3(RADAR_RANGE + 100, 0, 0).add(playerPos) }],
+        playerPos,
+        playerQuat,
+      ),
+    ).toHaveLength(0);
+  });
+
   it('enemy directly ahead (+Z) and above (+Y) has positive elevation and near-zero bearing', () => {
     // Player at origin, identity quaternion (facing +Z)
     const playerPos = new THREE.Vector3(0, 0, 0);
@@ -487,6 +662,26 @@ describe('computeRadarContacts', () => {
     expect(contacts.every((c) => c.type === 'enemy')).toBe(true);
   });
 
+  it('returns one contact per authoritative in-range enemy with derived bearing and elevation', () => {
+    const playerPos = new THREE.Vector3(0, 0, 0);
+    const playerQuat = new THREE.Quaternion();
+    const enemies = [
+      { position: new THREE.Vector3(0, 40, 100) },
+      { position: new THREE.Vector3(120, -30, 0) },
+      { position: new THREE.Vector3(0, 0, RADAR_RANGE + 50) },
+    ];
+
+    const contacts = computeRadarContacts(enemies, playerPos, playerQuat);
+
+    expect(contacts.length).toBe(2);
+    expect(contacts[0].position).toEqual(enemies[0].position);
+    expect(contacts[0].bearing).toBeCloseTo(0, 5);
+    expect(contacts[0].elevation).toBeGreaterThan(0);
+    expect(contacts[1].position).toEqual(enemies[1].position);
+    expect(contacts[1].bearing).toBeCloseTo(Math.PI / 2, 5);
+    expect(contacts[1].elevation).toBeLessThan(0);
+  });
+
   it('bearing and elevation are in expected ranges', () => {
     const playerPos = new THREE.Vector3(0, 0, 0);
     const playerQuat = new THREE.Quaternion();
@@ -523,5 +718,26 @@ describe('computeRadarContacts', () => {
     const facingX = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
     const [facingXContact] = computeRadarContacts([enemy], playerPos, facingX);
     expect(facingXContact.bearing).toBeCloseTo(0, 3);
+  });
+});
+
+// ── computeSpeedometerDisplay ─────────────────────────────────────────────────
+
+describe('computeSpeedometerDisplay', () => {
+  it('converts a synthetic ship-velocity vector to the expected m/s readout', () => {
+    const display = computeSpeedometerDisplay(new THREE.Vector3(12, 5, 0), 30, 30);
+
+    expect(display.speedMps).toBe(13);
+    expect(display.readoutText).toBe('SPEED  13 m/s');
+    expect(display.currentRatio).toBeCloseTo(13 / 30, 1);
+  });
+
+  it('scales the full gauge to the current max-speed limit while preserving the boost zone', () => {
+    const display = computeSpeedometerDisplay(new THREE.Vector3(40, 0, 0), 30, 48);
+
+    expect(display.boostZoneActive).toBe(true);
+    expect(display.normalRatio).toBeCloseTo(30 / 48, 5);
+    expect(display.boostZoneRatio).toBeCloseTo(18 / 48, 5);
+    expect(display.boostFillRatio).toBeCloseTo(10 / 18, 5);
   });
 });

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { CreditWallet } from './credits';
 import { PlayerStats } from './player';
+import { AMMO_RESUPPLY } from './ammoConfig';
 
 // ── Store placement constants ─────────────────────────────────────────────────
 export const STORE_X = 15;
@@ -22,9 +23,9 @@ export interface StoreItem {
 
 export const STORE_ITEMS: StoreItem[] = [
   // ── Ammo resupply ────────────────────────────────────────────────────────────
-  { name: 'Laser Ammo Pack',     desc: '+30 laser capacitor shots.',    cost:  150, category: 'ammo', ammoType: 'laser',    ammoAmount: 30 },
-  { name: 'Chaingun Ammo Crate', desc: '+120 high-calibre rounds.',     cost:  200, category: 'ammo', ammoType: 'chaingun', ammoAmount: 120 },
-  { name: 'Missile Rack',        desc: '+5 proximity-fused warheads.',  cost:  300, category: 'ammo', ammoType: 'missile',  ammoAmount: 5 },
+  { name: 'Laser Ammo Pack',     desc: `+${AMMO_RESUPPLY.laser} laser capacitor shots.`,    cost:  150, category: 'ammo', ammoType: 'laser',    ammoAmount: AMMO_RESUPPLY.laser },
+  { name: 'Chaingun Ammo Crate', desc: `+${AMMO_RESUPPLY.chaingun} high-calibre rounds.`,     cost:  200, category: 'ammo', ammoType: 'chaingun', ammoAmount: AMMO_RESUPPLY.chaingun },
+  { name: 'Missile Rack',        desc: `+${AMMO_RESUPPLY.missile} proximity-fused warheads.`,  cost:  300, category: 'ammo', ammoType: 'missile',  ammoAmount: AMMO_RESUPPLY.missile },
   // ── Weapons ──────────────────────────────────────────────────────────────────
   { name: 'Plasma Cannon',       desc: 'Experimental arc-discharge weapon.', cost: 1200, category: 'weapon' },
   // ── Shield upgrades (3 tiers) ────────────────────────────────────────────────

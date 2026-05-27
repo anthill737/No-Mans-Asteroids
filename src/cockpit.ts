@@ -1,4 +1,10 @@
 import * as THREE from 'three';
+import {
+  COCKPIT_READOUT_NODE_BY_KEY,
+  COCKPIT_READOUT_NODE_NAMES,
+  type CockpitReadoutKey,
+  type CockpitReadoutNodeName,
+} from './cockpitReadouts';
 
 export interface RadarBlip {
   position: THREE.Vector3;
@@ -13,18 +19,21 @@ export type WeaponType = 'laser' | 'chaingun' | 'missile';
 
 export interface CockpitHUD {
   group: THREE.Group;
+  bindToCockpit(cockpitRoot: THREE.Object3D | null): void;
   setHealth(ratio: number): void;
   setShield(ratio: number): void;
   setAmmo(count: number, maxCount: number): void;
   setActiveWeapon(weapon: WeaponType): void;
   setCredits(amount: number): void;
+  setBoostActive(active: boolean): void;
+  setSpeed(velocity: THREE.Vector3, normalMaxSpeed: number, currentMaxSpeed: number): void;
   update(dt: number): void;
   updateRadar(
     playerPos: THREE.Vector3,
     playerQuat: THREE.Quaternion,
     blips: RadarBlip[],
   ): void;
-  getReadoutText(key: 'health' | 'shields' | 'ammo' | 'credits' | 'weapon'): string;
+  getReadoutText(key: 'health' | 'shields' | 'ammo' | 'credits' | 'weapon' | 'boost' | 'speed'): string;
 }
 
 export const RADAR_RANGE = 600;
@@ -33,6 +42,7 @@ const MAX_BLIPS = 20;
 const AMMO_SEGMENTS = 10;
 const LOW_HEALTH_THRESHOLD = 0.25;
 const BLINK_PERIOD = 0.5;
+const SPEED_GAUGE_WIDTH = 0.46;
 
 const WEAPON_COLORS: Record<WeaponType, number> = {
   laser: 0x00ffff,
@@ -77,6 +87,41 @@ export function computeRadarContacts(
   }
 
   return blips;
+}
+
+export interface SpeedometerDisplay {
+  speedMps: number;
+  readoutText: string;
+  currentRatio: number;
+  normalRatio: number;
+  boostZoneRatio: number;
+  boostFillRatio: number;
+  boostZoneActive: boolean;
+}
+
+export function computeSpeedometerDisplay(
+  velocity: THREE.Vector3,
+  normalMaxSpeed: number,
+  currentMaxSpeed: number,
+): SpeedometerDisplay {
+  const speed = Math.max(0, velocity.length());
+  const normalMax = Math.max(0.0001, normalMaxSpeed);
+  const maxSpeed = Math.max(normalMax, currentMaxSpeed, 0.0001);
+  const boostRange = Math.max(0, maxSpeed - normalMax);
+  const speedMps = Math.round(speed);
+  const boostZoneActive = boostRange > 0.0001;
+
+  return {
+    speedMps,
+    readoutText: `SPEED  ${speedMps} m/s`,
+    currentRatio: Math.max(0, Math.min(1, speed / maxSpeed)),
+    normalRatio: Math.max(0, Math.min(1, normalMax / maxSpeed)),
+    boostZoneRatio: Math.max(0, Math.min(1, boostRange / maxSpeed)),
+    boostFillRatio: boostZoneActive
+      ? Math.max(0, Math.min(1, (speed - normalMax) / boostRange))
+      : 0,
+    boostZoneActive,
+  };
 }
 
 function makeBar(
@@ -172,6 +217,32 @@ function makeTextPlane(
 
 export function createCockpitMesh(): CockpitHUD {
   const group = new THREE.Group();
+  const boundReadoutNodes = new Map<CockpitReadoutNodeName, THREE.Object3D>();
+
+  function bindToCockpit(cockpitRoot: THREE.Object3D | null): void {
+    boundReadoutNodes.clear();
+    if (!cockpitRoot) return;
+
+    for (const name of COCKPIT_READOUT_NODE_NAMES) {
+      const node = cockpitRoot.getObjectByName(name);
+      if (!node) continue;
+      node.userData.cockpitHudBound = true;
+      boundReadoutNodes.set(name, node);
+    }
+  }
+
+  function syncBoundReadoutText(key: CockpitReadoutKey, text: string): void {
+    const node = boundReadoutNodes.get(COCKPIT_READOUT_NODE_BY_KEY[key]);
+    if (!node) return;
+    node.userData.hudReadout = key;
+    node.userData.hudReadoutText = text;
+  }
+
+  function syncBoundNode(name: CockpitReadoutNodeName, data: Record<string, unknown>): void {
+    const node = boundReadoutNodes.get(name);
+    if (!node) return;
+    Object.assign(node.userData, data);
+  }
 
   const panelMat = new THREE.MeshLambertMaterial({
     color: 0x1a1a2e,
@@ -220,6 +291,8 @@ export function createCockpitMesh(): CockpitHUD {
   const ammoTextPlane = makeTextPlane(group, 0.48, -0.285, -0.87, 0.34, 0.046, 'ammo');
   const creditsTextPlane = makeTextPlane(group, -0.45, -0.44, -0.87, 0.42, 0.046, 'credits');
   const weaponTextPlane = makeTextPlane(group, -0.92, -0.245, -0.84, 0.20, 0.046, 'weapon');
+  const boostTextPlane = makeTextPlane(group, 0.44, -0.44, -0.87, 0.20, 0.046, 'boost');
+  const speedTextPlane = makeTextPlane(group, 0.0, -0.205, -0.87, 0.42, 0.046, 'speed');
 
   const readoutTexts: Record<string, string> = {
     health: '',
@@ -227,6 +300,8 @@ export function createCockpitMesh(): CockpitHUD {
     ammo: '',
     credits: '',
     weapon: '',
+    boost: '',
+    speed: '',
   };
 
   const warningLightMat = new THREE.MeshLambertMaterial({
@@ -261,6 +336,12 @@ export function createCockpitMesh(): CockpitHUD {
     healthTextPlane.draw(text);
 
     _lowHealthActive = r < LOW_HEALTH_THRESHOLD;
+    syncBoundReadoutText('health', text);
+    syncBoundNode('HEALTH', { healthRatio: r });
+    syncBoundNode('LOW_HEALTH_WARNING', {
+      lowHealthActive: _lowHealthActive,
+      visible: _lowHealthActive,
+    });
     if (!_lowHealthActive) {
       warningLight.visible = false;
       warningLightMat.emissiveIntensity = 0;
@@ -274,6 +355,8 @@ export function createCockpitMesh(): CockpitHUD {
     const text = `SHIELDS  ${cur} / 100`;
     readoutTexts.shields = text;
     shieldTextPlane.draw(text);
+    syncBoundReadoutText('shields', text);
+    syncBoundNode('SHIELDS', { shieldRatio: Math.max(0, Math.min(1, ratio)) });
   }
 
   function setAmmo(count: number, maxCount: number): void {
@@ -284,6 +367,12 @@ export function createCockpitMesh(): CockpitHUD {
     const text = `AMMO  ${count} / ${maxCount}`;
     readoutTexts.ammo = text;
     ammoTextPlane.draw(text);
+    syncBoundReadoutText('ammo', text);
+    syncBoundNode('AMMO', {
+      ammoCount: count,
+      ammoMax: maxCount,
+      ammoRatio: maxCount > 0 ? Math.max(0, Math.min(1, count / maxCount)) : 0,
+    });
   }
 
   const weaponOrder: WeaponType[] = ['laser', 'chaingun', 'missile'];
@@ -321,11 +410,163 @@ export function createCockpitMesh(): CockpitHUD {
     const text = `WEAPON  ${weapon.toUpperCase()}`;
     readoutTexts.weapon = text;
     weaponTextPlane.draw(text);
+    syncBoundReadoutText('weapon', text);
+    syncBoundNode('WEAPON', { activeWeapon: weapon });
   }
 
   setActiveWeapon('laser');
   setHealth(1);
   setShield(1);
+
+  const speedBgMat = new THREE.MeshLambertMaterial({ color: 0x061416 });
+  const speedGaugeBg = new THREE.Mesh(
+    new THREE.BoxGeometry(SPEED_GAUGE_WIDTH + 0.01, 0.018, 0.032),
+    speedBgMat,
+  );
+  speedGaugeBg.position.set(0, -0.245, -0.87);
+  speedGaugeBg.userData.role = 'speedGaugeBg';
+  group.add(speedGaugeBg);
+
+  const speedNormalMat = new THREE.MeshLambertMaterial({
+    color: 0x00e6c8,
+    emissive: new THREE.Color(0x00e6c8),
+    emissiveIntensity: 0.7,
+  });
+  const speedBoostZoneMat = new THREE.MeshLambertMaterial({
+    color: 0x553000,
+    emissive: new THREE.Color(0xff7a00),
+    emissiveIntensity: 0.15,
+  });
+  const speedBoostFillMat = new THREE.MeshLambertMaterial({
+    color: 0xffa000,
+    emissive: new THREE.Color(0xff7a00),
+    emissiveIntensity: 1.1,
+  });
+
+  const speedGaugeLeft = -SPEED_GAUGE_WIDTH / 2;
+  const speedNormalPivot = new THREE.Group();
+  speedNormalPivot.position.set(speedGaugeLeft, -0.245, -0.87);
+  speedNormalPivot.userData.role = 'speedNormalFill';
+  group.add(speedNormalPivot);
+  const speedNormalFill = new THREE.Mesh(
+    new THREE.BoxGeometry(SPEED_GAUGE_WIDTH, 0.012, 0.026),
+    speedNormalMat,
+  );
+  speedNormalFill.position.x = SPEED_GAUGE_WIDTH / 2;
+  speedNormalPivot.add(speedNormalFill);
+
+  const speedBoostZone = new THREE.Mesh(
+    new THREE.BoxGeometry(SPEED_GAUGE_WIDTH, 0.014, 0.028),
+    speedBoostZoneMat,
+  );
+  speedBoostZone.position.set(0, -0.245, -0.87);
+  speedBoostZone.userData.role = 'speedBoostZone';
+  group.add(speedBoostZone);
+
+  const speedBoostPivot = new THREE.Group();
+  speedBoostPivot.position.set(speedGaugeLeft, -0.245, -0.868);
+  speedBoostPivot.userData.role = 'speedBoostFill';
+  group.add(speedBoostPivot);
+  const speedBoostFill = new THREE.Mesh(
+    new THREE.BoxGeometry(SPEED_GAUGE_WIDTH, 0.012, 0.026),
+    speedBoostFillMat,
+  );
+  speedBoostFill.position.x = SPEED_GAUGE_WIDTH / 2;
+  speedBoostPivot.add(speedBoostFill);
+
+  function setSegmentWidth(
+    mesh: THREE.Mesh,
+    left: number,
+    width: number,
+    y: number,
+    z: number,
+    visible = true,
+  ): void {
+    const clampedWidth = Math.max(0, Math.min(SPEED_GAUGE_WIDTH, width));
+    mesh.visible = visible && clampedWidth > 0.0001;
+    mesh.scale.x = Math.max(clampedWidth / SPEED_GAUGE_WIDTH, 0.0001);
+    mesh.position.set(left + clampedWidth / 2, y, z);
+  }
+
+  function setSpeed(
+    velocity: THREE.Vector3,
+    normalMaxSpeed: number,
+    currentMaxSpeed: number,
+  ): void {
+    const display = computeSpeedometerDisplay(velocity, normalMaxSpeed, currentMaxSpeed);
+    readoutTexts.speed = display.readoutText;
+    speedTextPlane.draw(display.readoutText);
+    syncBoundReadoutText('speed', display.readoutText);
+    syncBoundNode('SPEED_NUMERIC', {
+      hudReadout: 'speed',
+      hudReadoutText: display.readoutText,
+      speedMps: display.speedMps,
+    });
+    syncBoundNode('SPEED_GAUGE', {
+      speedMps: display.speedMps,
+      currentRatio: display.currentRatio,
+      normalRatio: display.normalRatio,
+      boostZoneRatio: display.boostZoneRatio,
+      boostFillRatio: display.boostFillRatio,
+      boostZoneActive: display.boostZoneActive,
+    });
+
+    const normalZoneWidth = SPEED_GAUGE_WIDTH * display.normalRatio;
+    const normalFillWidth = SPEED_GAUGE_WIDTH * Math.min(display.currentRatio, display.normalRatio);
+    const boostZoneWidth = SPEED_GAUGE_WIDTH * display.boostZoneRatio;
+    const boostZoneLeft = speedGaugeLeft + normalZoneWidth;
+    const boostFillWidth = boostZoneWidth * display.boostFillRatio;
+
+    speedNormalFill.scale.x = Math.max(normalFillWidth / SPEED_GAUGE_WIDTH, 0.0001);
+    speedNormalFill.position.x = normalFillWidth / 2;
+
+    setSegmentWidth(
+      speedBoostZone,
+      boostZoneLeft,
+      boostZoneWidth,
+      -0.245,
+      -0.869,
+      display.boostZoneActive,
+    );
+    speedBoostPivot.position.x = boostZoneLeft;
+    speedBoostFill.scale.x = Math.max(boostFillWidth / SPEED_GAUGE_WIDTH, 0.0001);
+    speedBoostFill.position.x = boostFillWidth / 2;
+    speedBoostFill.visible = display.boostZoneActive && boostFillWidth > 0.0001;
+
+    speedGaugeBg.userData.speedMps = display.speedMps;
+    speedGaugeBg.userData.currentRatio = display.currentRatio;
+    speedBoostZone.userData.boostZoneActive = display.boostZoneActive;
+  }
+
+  setSpeed(new THREE.Vector3(), 1, 1);
+
+  const boostLightMat = new THREE.MeshLambertMaterial({
+    color: 0x241000,
+    emissive: new THREE.Color(0x000000),
+    emissiveIntensity: 0,
+  });
+  const boostLight = new THREE.Mesh(
+    new THREE.BoxGeometry(0.07, 0.026, 0.026),
+    boostLightMat,
+  );
+  boostLight.position.set(0.58, -0.44, -0.87);
+  boostLight.userData.isBoostIndicator = true;
+  group.add(boostLight);
+
+  function setBoostActive(active: boolean): void {
+    boostLightMat.color.setHex(active ? 0xff9a00 : 0x241000);
+    boostLightMat.emissive.setHex(active ? 0xff7a00 : 0x000000);
+    boostLightMat.emissiveIntensity = active ? 1.6 : 0;
+    boostLight.userData.boostActive = active;
+
+    const text = 'BOOST';
+    readoutTexts.boost = text;
+    boostTextPlane.draw(text);
+    syncBoundReadoutText('boost', text);
+    syncBoundNode('BOOST', { boostActive: active });
+  }
+
+  setBoostActive(false);
 
   // ── Radar display (3D sphere with horizontal bearing + elevation encoding) ──
 
@@ -461,6 +702,17 @@ export function createCockpitMesh(): CockpitHUD {
       mat.color.setHex(color);
       mat.emissive.setHex(color);
     }
+
+    syncBoundReadoutText('radar', 'RADAR');
+    syncBoundNode('RADAR', { contactCount: idx });
+    syncBoundNode('CONTACTS', {
+      contactCount: idx,
+      contacts: blips.slice(0, idx).map((blip) => ({
+        type: blip.type,
+        bearing: blip.bearing,
+        elevation: blip.elevation,
+      })),
+    });
   }
 
   let _credits = 0;
@@ -470,9 +722,11 @@ export function createCockpitMesh(): CockpitHUD {
     const text = `CREDITS  ${_credits}`;
     readoutTexts.credits = text;
     creditsTextPlane.draw(text);
+    syncBoundReadoutText('credits', text);
+    syncBoundNode('CREDITS', { credits: _credits });
   }
 
-  function getReadoutText(key: 'health' | 'shields' | 'ammo' | 'credits' | 'weapon'): string {
+  function getReadoutText(key: 'health' | 'shields' | 'ammo' | 'credits' | 'weapon' | 'boost' | 'speed'): string {
     return readoutTexts[key] ?? '';
   }
 
@@ -482,15 +736,23 @@ export function createCockpitMesh(): CockpitHUD {
     const on = (_warningPhase % BLINK_PERIOD) < BLINK_PERIOD / 2;
     warningLight.visible = on;
     warningLightMat.emissiveIntensity = on ? 1.5 : 0;
+    syncBoundNode('LOW_HEALTH_WARNING', {
+      lowHealthActive: true,
+      visible: on,
+      warningPhase: _warningPhase,
+    });
   }
 
   return {
     group,
+    bindToCockpit,
     setHealth,
     setShield,
     setAmmo,
     setActiveWeapon,
     setCredits,
+    setBoostActive,
+    setSpeed,
     update,
     updateRadar,
     getReadoutText,

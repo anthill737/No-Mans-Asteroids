@@ -5,25 +5,35 @@
 - **Node.js LTS** (v20 or v22 recommended — download from https://nodejs.org/en/download)
 - npm (included with Node.js)
 
-## Install
+## Recommended Launch
 
-Open PowerShell or cmd in the project folder, then run:
+Double-click `start-game.bat` from Windows Explorer.
+
+The launcher checks for Node.js/npm, installs dependencies if `node_modules` is missing, starts the dev server, and opens `http://localhost:9999` in your default browser. Keep the console window open while playing; press Ctrl+C in that window to stop the server.
+
+## Manual Terminal Fallback
+
+Open PowerShell or cmd in the project folder, then install dependencies:
 
 ```
 npm install
 ```
 
-## Configuration
-
-No configuration is required beyond the bundled `vite.config.ts`. There are no environment variables to set.
-
-## Launch
+Start the dev server:
 
 ```
 npm run dev
 ```
 
-The game runs at **http://localhost:9999**.
+Then open `http://localhost:9999` in your browser.
+
+## Configuration
+
+No configuration is required beyond the bundled `vite.config.ts`. There are no environment variables to set.
+
+Open Settings -> Ship in-game to choose free Cockpit, Wings, and Hull variants.
+
+## Port
 
 If port 9999 is already in use the dev server will exit with an error (it will not auto-select another port). Stop whatever is using that port and re-run.
 

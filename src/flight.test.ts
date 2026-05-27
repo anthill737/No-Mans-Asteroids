@@ -7,7 +7,18 @@ import {
   THRUST,
   MAX_SPEED,
   FlightController,
+  STRONG_BOOST_SPEED_MULTIPLIER,
+  getNormalMaxForwardSpeed,
+  getStrongBoostMaxForwardSpeed,
+  isStrongBoostKey,
 } from './flight';
+
+function runForward(controller: FlightController, frames = 900): number {
+  const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+  const pos = new THREE.Vector3();
+  for (let i = 0; i < frames; i++) controller.update(1 / 60, euler, pos);
+  return controller.velocity.length();
+}
 
 describe('applyDrag', () => {
   it('reduces velocity magnitude each frame', () => {
@@ -175,5 +186,126 @@ describe('FlightController', () => {
     fc.update(1 / 60, euler, pos);
     // With zeroed velocity and no key input, position should remain at origin (within drag epsilon)
     expect(pos.length()).toBe(0);
+  });
+
+  it('clearInput() releases held thrust and boost keys for menu pauses', () => {
+    const fc = new FlightController();
+    fc.setKey('w', true);
+    fc.setKey('ShiftLeft', true);
+
+    expect(fc.getThrustInputMagnitude()).toBeGreaterThan(0);
+    expect(fc.isStrongBoostActive()).toBe(true);
+
+    fc.clearInput();
+
+    expect(fc.getThrustInputMagnitude()).toBe(0);
+    expect(fc.isStrongBoostActive()).toBe(false);
+  });
+
+  it('exports a SHIFT boost speed cap at least 1.5x normal forward top speed', () => {
+    expect(STRONG_BOOST_SPEED_MULTIPLIER).toBeGreaterThanOrEqual(1.5);
+    expect(getStrongBoostMaxForwardSpeed()).toBeGreaterThanOrEqual(
+      getNormalMaxForwardSpeed() * 1.5,
+    );
+  });
+
+  it('holding SHIFT while flying forward reaches at least 1.5x normal sustained forward speed', () => {
+    const normal = new FlightController();
+    normal.setKey('w', true);
+    const normalSpeed = runForward(normal);
+
+    const boosted = new FlightController();
+    boosted.setKey('w', true);
+    boosted.setKey('ShiftLeft', true);
+    const boostedSpeed = runForward(boosted);
+
+    expect(boostedSpeed).toBeGreaterThanOrEqual(normalSpeed * 1.5);
+  });
+
+  it('both left SHIFT and right SHIFT key codes map to strong boost activation', () => {
+    expect(isStrongBoostKey('ShiftLeft')).toBe(true);
+    expect(isStrongBoostKey('ShiftRight')).toBe(true);
+
+    const left = new FlightController();
+    left.setKey('ShiftLeft', true);
+    expect(left.isStrongBoostActive()).toBe(true);
+
+    const right = new FlightController();
+    right.setKey('ShiftRight', true);
+    expect(right.isStrongBoostActive()).toBe(true);
+  });
+
+  it('reports strong boost engaged only when forward thrust and SHIFT are both active', () => {
+    const fc = new FlightController();
+    fc.setKey('ShiftLeft', true);
+    expect(fc.isStrongBoostEngaged()).toBe(false);
+
+    fc.setKey('w', true);
+    expect(fc.isStrongBoostEngaged()).toBe(true);
+
+    fc.setKey('ShiftLeft', false);
+    expect(fc.isStrongBoostEngaged()).toBe(false);
+  });
+
+  it('releasing SHIFT decelerates through drag instead of instantly cutting to normal cruise speed', () => {
+    const normal = new FlightController();
+    normal.setKey('w', true);
+    const normalCruiseSpeed = runForward(normal);
+
+    const boosted = new FlightController();
+    boosted.setKey('w', true);
+    boosted.setKey('ShiftLeft', true);
+    runForward(boosted);
+    const boostedSpeed = boosted.velocity.length();
+
+    boosted.setKey('ShiftLeft', false);
+    boosted.update(1 / 60, new THREE.Euler(0, 0, 0, 'YXZ'), new THREE.Vector3());
+
+    expect(boosted.velocity.length()).toBeLessThan(boostedSpeed);
+    expect(boosted.velocity.length()).toBeGreaterThan(normalCruiseSpeed);
+  });
+
+  it('does not apply SHIFT boost when boostAllowed is false for surface or warp states', () => {
+    const normal = new FlightController();
+    normal.setKey('w', true);
+    const normalSpeed = runForward(normal);
+
+    const gated = new FlightController();
+    gated.setKey('w', true);
+    gated.setKey('ShiftRight', true);
+    const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    const pos = new THREE.Vector3();
+    for (let i = 0; i < 900; i++) {
+      gated.update(1 / 60, euler, pos, { boostAllowed: false });
+    }
+
+    expect(gated.velocity.length()).toBeCloseTo(normalSpeed, 5);
+  });
+
+  it('leaves non-forward flight controls unchanged while SHIFT is held', () => {
+    const strafe = new FlightController();
+    strafe.setKey('d', true);
+    strafe.update(1 / 60, new THREE.Euler(0, 0, 0, 'YXZ'), new THREE.Vector3());
+
+    const strafeWithShift = new FlightController();
+    strafeWithShift.setKey('d', true);
+    strafeWithShift.setKey('ShiftLeft', true);
+    strafeWithShift.update(1 / 60, new THREE.Euler(0, 0, 0, 'YXZ'), new THREE.Vector3());
+
+    expect(strafeWithShift.velocity.x).toBeCloseTo(strafe.velocity.x, 6);
+    expect(strafeWithShift.velocity.z).toBeCloseTo(strafe.velocity.z, 6);
+
+    const roll = new FlightController();
+    roll.setKey('q', true);
+    const rollEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+    roll.update(1 / 60, rollEuler, new THREE.Vector3());
+
+    const rollWithShift = new FlightController();
+    rollWithShift.setKey('q', true);
+    rollWithShift.setKey('ShiftRight', true);
+    const shiftedRollEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+    rollWithShift.update(1 / 60, shiftedRollEuler, new THREE.Vector3());
+
+    expect(shiftedRollEuler.z).toBeCloseTo(rollEuler.z, 6);
   });
 });
